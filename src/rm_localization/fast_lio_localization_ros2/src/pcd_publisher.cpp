@@ -1,3 +1,4 @@
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -15,6 +16,8 @@ public:
         this->declare_parameter<std::string>("map", "");
         this->declare_parameter<std::string>("frame_id", "map3d");
         this->declare_parameter<double>("rate", 5.0);
+        this->declare_parameter<bool>("filter_invalid_points", true);
+        this->declare_parameter<double>("max_abs_coord", 100000.0);
 
         rclcpp::QoS qos(1);
         qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
@@ -29,10 +32,10 @@ public:
             if (pcl::io::loadPCDFile<pcl::PointXYZ>(path, *cloud) == -1) {
                 RCLCPP_ERROR(this->get_logger(), "Failed to load PCD: %s", path.c_str());
             } else {
-                cloud_ = cloud;
+                cloud_ = sanitizeCloud(cloud);
                 RCLCPP_INFO(
                     this->get_logger(),
-                    "Loaded PCD: %s with %zu points",
+                    "Loaded PCD: %s with %zu valid points",
                     path.c_str(),
                     cloud_->points.size()
                 );
@@ -49,6 +52,55 @@ public:
     }
 
 private:
+    pcl::PointCloud<pcl::PointXYZ>::Ptr
+    sanitizeCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& input) {
+        bool filter_invalid = this->get_parameter("filter_invalid_points").as_bool();
+        double max_abs_coord = this->get_parameter("max_abs_coord").as_double();
+
+        if (!filter_invalid) {
+            return input;
+        }
+
+        auto output = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        output->points.reserve(input->points.size());
+
+        size_t removed_non_finite = 0;
+        size_t removed_out_of_range = 0;
+
+        for (const auto& pt: input->points) {
+            if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+                ++removed_non_finite;
+                continue;
+            }
+            if (std::abs(pt.x) > max_abs_coord || std::abs(pt.y) > max_abs_coord
+                || std::abs(pt.z) > max_abs_coord)
+            {
+                ++removed_out_of_range;
+                continue;
+            }
+            output->points.push_back(pt);
+        }
+
+        output->width = static_cast<uint32_t>(output->points.size());
+        output->height = 1;
+        output->is_dense = true;
+
+        const size_t total_removed = removed_non_finite + removed_out_of_range;
+        if (total_removed > 0) {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Filtered invalid map points: removed %zu (non-finite=%zu, out-of-range=%zu, max_abs_coord=%.2f), kept %zu",
+                total_removed,
+                removed_non_finite,
+                removed_out_of_range,
+                max_abs_coord,
+                output->points.size()
+            );
+        }
+
+        return output;
+    }
+
     void onTimer() {
         if (!cloud_) {
             // publish empty

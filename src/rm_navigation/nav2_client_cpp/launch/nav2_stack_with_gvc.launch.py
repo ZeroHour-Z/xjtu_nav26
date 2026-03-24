@@ -13,7 +13,7 @@ def generate_launch_description():
 
     # 默认地图路径
     default_map_path = PathJoinSubstitution(
-        [FindPackageShare("rm_bringup"), "PCD", "test", "newMap.yaml"],
+        [FindPackageShare("rm_bringup"), "PCD", "RMUL", "RMUL.yaml"],
     )
 
     map_arg = DeclareLaunchArgument(

@@ -8,7 +8,7 @@ region_detector_node:
 
     lookahead_distance: 0.5
     publish_rate: 20.0
-    fluctuate_region_1: [0.0]
+    fluctuate_region_1: [1.86, 0.66, 2.03, 1.4, 0.43, 1.75, 0.24, 0.99]
     fluctuate_region_1_yaw: 0.0
     fluctuate_region_2: [0.0]
     fluctuate_region_2_yaw: 0.0

@@ -77,115 +77,115 @@ controller_server:
     # === Regulated Pure Pursuit 路径跟踪控制器 ===
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.5  # 期望线速度(m/s)
-      lookahead_dist: 2.0  # 前瞻距离(m) - 固定大前瞻以稳定陀螺时跟踪
-      min_lookahead_dist: 1.5  # 最小前瞻距离(m) - 提高最小值
-      max_lookahead_dist: 3.0  # 最大前瞻距离(m)
-      lookahead_time: 1.5  # 前瞻时间(s) - 降低以减少速度影响
-      regulated_linear_scaling_min_radius: 0.3  # 线速度缩放最小半径(m) - 更小允许更急转弯
+      desired_linear_vel: 0.5  # 期望线速度(m/s) - 过弯时降低切角风险
+      lookahead_dist: 0.6  # 前瞻距离(m) - 减小以避免急弯内切
+      min_lookahead_dist: 0.3  # 最小前瞻距离(m)
+      max_lookahead_dist: 0.9  # 最大前瞻距离(m)
+      lookahead_time: 1.5  # 前瞻时间(s)
+      regulated_linear_scaling_min_radius: 0.9  # 线速度缩放最小半径(m) - 更小允许更急转弯
       use_velocity_scaled_lookahead_dist: false  # 禁用速度缩放 - 陀螺时用固定前瞻
       min_approach_linear_velocity: 0.05  # 接近目标时最小线速度(m/s)
       approach_velocity_scaling_dist: 0.6  # 接近目标时速度缩放距离(m)
       use_collision_detection: true  # 启用碰撞检测
-      max_allowed_time_to_collision_up_to_carrot: 1.0  # 允许的最大碰撞时间(s)
-      use_regulated_angular_vel_scaling: false  # 禁用角速度调节 - 陀螺自主控制角速度
-      use_cost_regulated_linear_velocity_scaling: true  # 根据代价地图调节速度
-      cost_scaling_dist: 0.6  # 代价缩放距离(m)
-      cost_scaling_gain: 1.0  # 代价缩放增益
+      max_allowed_time_to_collision_up_to_carrot: 1.0  # 允许的最大碰撞时间(s) - 提前触发减速
+      use_regulated_angular_vel_scaling: false  # 启用角速度调节 - 近障碍时抑制旋转过冲
+      use_cost_regulated_linear_velocity_scaling: false  # 根据代价地图调节速度
+      cost_scaling_dist: 0.8  # 代价缩放距离(m)
+      cost_scaling_gain: 1.5  # 代价缩放增益
       allow_reversing: false  # 禁止倒车
       use_rotate_to_heading: false  # 【关键】禁用先转向再前进模式，适应陀螺
       rotate_to_heading_min_angle: 0.785  # 旋转对齐最小角度(rad, ~45度)
-      max_angular_vel: 2.0  # 最大角速度(rad/s) - 提高以匹配陀螺旋转
+      max_angular_vel: 1.0  # 最大角速度(rad/s) - 限制旋转扫碰风险
       max_robot_pose_search_dist: 10.0  # 最大机器人位姿搜索距离(m)
       use_interpolation: true  # 使用路径插值
-      transform_tolerance: 1.0  # TF变换容忍度(s) - 大幅增加应对陀螺旋转
+      transform_tolerance: 0.2  # TF变换容忍度(s) - 降低时延导致的贴障
 
 controller_server_rclcpp_node:
   ros__parameters:
     use_sim_time: False
 
-# local_costmap:
-#   local_costmap:
-#     ros__parameters:
-#       update_frequency: 20.0
-#       publish_frequency: 10.0
-#       global_frame: odom
-#       # global_frame: camera_init
-#       robot_base_frame: base_link
-#       use_sim_time: False
-#       rolling_window: true
-#       width: 5
-#       height: 5
-#       resolution: 0.05
-#       robot_radius: 0.2
-#       plugins: ["voxel2d_layer", "voxel3d_layer", "click_obstacles_layer", "inflation_layer"]
-#       inflation_layer:
-#         plugin: "nav2_costmap_2d::InflationLayer"
-#         cost_scaling_factor: 8.0
-#         inflation_radius: 0.7
-#       voxel2d_layer:
-#         plugin: "nav2_costmap_2d::VoxelLayer"
-#         enabled: True
-#         publish_voxel_map: False
-#         origin_z: 0.0
-#         z_resolution: 0.05
-#         z_voxels: 16
-#         max_obstacle_height: 2.0
-#         mark_threshold: 0
-#         observation_sources: scan 
-#         scan:
-#           topic: /scan
-#           raytrace_min_range: 0.0
-#           raytrace_max_range: 50.0
-#           min_obstacle_height: 0.0
-#           max_obstacle_height: 2.0
-#           clearing: True
-#           marking: True
-#           data_type: "LaserScan"
-#       voxel3d_layer:
-#         plugin: "nav2_costmap_2d::VoxelLayer"
-#         enabled: False
-#         publish_voxel_map: False
-#         origin_z: 0.0
-#         z_resolution: 0.05
-#         z_voxels: 16
-#         mark_threshold: 1
-#         observation_sources: livox
-#         min_obstacle_height: 0.00
-#         max_obstacle_height: 2.0 
-#         livox:
-#           topic: /cloud_registerd
-#           raytrace_min_range: 0.0
-#           raytrace_max_range: 5.0
-#           min_obstacle_height: 0.2
-#           max_obstacle_height: 1.0 
-#           clearing: True
-#           marking: True
-#           data_type: "PointCloud2"
-#       click_obstacles_layer:
-#         plugin: "click_obstacles_layer::ClickObstaclesLayer"
-#         enabled: False
-#         obstacle_radius: 0.20
-#       static_layer:
-#         map_subscribe_transient_local: True
-#       always_send_full_costmap: True
-#   local_costmap_client:
-#     ros__parameters:
-#       use_sim_time: False
-#   local_costmap_rclcpp_node:
-#     ros__parameters:
-#       use_sim_time: False
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      # global_frame: camera_init
+      robot_base_frame: base_link
+      use_sim_time: False
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.05
+      robot_radius: 0.2
+      plugins: ["voxel2d_layer", "voxel3d_layer", "click_obstacles_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.7
+      voxel2d_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: False
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan 
+        scan:
+          topic: /scan
+          raytrace_min_range: 0.0
+          raytrace_max_range: 50.0
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+      voxel3d_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: False
+        publish_voxel_map: False
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        mark_threshold: 1
+        observation_sources: livox
+        min_obstacle_height: 0.00
+        max_obstacle_height: 2.0 
+        livox:
+          topic: /cloud_registerd
+          raytrace_min_range: 0.0
+          raytrace_max_range: 5.0
+          min_obstacle_height: 0.2
+          max_obstacle_height: 1.0 
+          clearing: True
+          marking: True
+          data_type: "PointCloud2"
+      click_obstacles_layer:
+        plugin: "click_obstacles_layer::ClickObstaclesLayer"
+        enabled: False
+        obstacle_radius: 0.20
+      static_layer:
+        map_subscribe_transient_local: True
+      always_send_full_costmap: True
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: False
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: False
 
 # ============ 全局代价地图配置 ============
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 10.0  # 降低更新频率减少抖动(Hz)
-      publish_frequency: 5.0  # 降低发布频率(Hz)
+      update_frequency: 20.0  # 降低更新频率减少抖动(Hz)
+      publish_frequency: 10.0  # 降低发布频率(Hz)
       global_frame: map  # 全局坐标系
       robot_base_frame: base_link  # 机器人底盘坐标系
       use_sim_time: False
-      robot_radius: 0.2  # 机器人半径(m) - 用于膨胀
+      robot_radius: 0.25  # 机器人半径(m) = 39cm
       resolution: 0.05  # 地图分辨率(m/pixel)
       track_unknown_space: true  # 跟踪未知空间
       plugins: ["static_layer", "voxel2d_layer", "click_obstacles_layer", "inflation_layer"]  # 使用的层插件
@@ -248,8 +248,8 @@ global_costmap:
       # === 膨胀层配置 ===
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 8.0  # 代价衰减因子(值越大衰减越快)
-        inflation_radius: 0.7  # 膨胀半径(m) - 障碍物周围的安全距离
+        cost_scaling_factor: 4.0  # 代价衰减因子(值越大衰减越快)
+        inflation_radius: 0.8  # 膨胀半径(m) - 障碍物周围的安全距离
       always_send_full_costmap: True
   global_costmap_client:
     ros__parameters:

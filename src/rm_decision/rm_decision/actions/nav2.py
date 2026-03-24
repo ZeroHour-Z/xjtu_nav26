@@ -24,6 +24,7 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		yaw: float = 0.0,
 		timeout_s: Optional[float] = None,
 		cancel_on_terminate: bool = True,
+		retry_on_failure: bool = False,
 	):
 		super().__init__(name)
 		self.node = node
@@ -33,6 +34,7 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		self._sent = False
 		self.timeout_s = timeout_s
 		self.cancel_on_terminate = cancel_on_terminate
+		self.retry_on_failure = retry_on_failure
 		self._start_time = None
 		self._goal_pose = goal_pose
 		self._frame_id = frame_id
@@ -93,6 +95,15 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 			if status_code == 4:  # STATUS_SUCCEEDED
 				return Status.SUCCESS
 			else:
+				if self.retry_on_failure:
+					self.node.get_logger().warn(
+						f"NavigateToPose result status={status_code}, retrying same goal"
+					)
+					self._sent = False
+					self._goal_handle = None
+					self._result_future = None
+					self._start_time = self.node.get_clock().now()
+					return Status.RUNNING
 				return Status.FAILURE
 
 		return Status.RUNNING

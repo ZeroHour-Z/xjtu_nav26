@@ -57,11 +57,86 @@ tree:
             params:
               server_name: "navigate_to_pose"
               frame_id: "map"
-              x: -2.6
-              y: -1.3
+              x: -1.7
+              y: -1.2
               yaw: 0.0
               timeout_s: 120
+      # # ============ 追击分支 ============
+      # - type: Sequence
+      #   name: 追击模式
+      #   params:
+      #     memory: true
+      #   children:
+      #     # 检查是否需要追击（正在追击中 或 chase参数为true）
+      #     - type: Selector
+      #       name: 追击条件检测
+      #       params:
+      #         memory: false
+      #       children:
+      #         - type: CheckBlackboard
+      #           name: 已在追击中?
+      #           params:
+      #             key: "is_chasing"
+      #             expected: true
+      #         - type: ParamBoolCondition
+      #           name: 追击参数触发?
+      #           params:
+      #             param: "chase"
+      #             expected: true
+      #             latched_ok: false
 
+      #     # 标记进入追击状态
+      #     - type: SetBlackboard
+      #       name: 设置追击标记
+      #       params:
+      #         key: "is_chasing"
+      #         value: true
+
+      #     # 发布状态消息（可选，用于调试）
+      #     - type: PublishString
+      #       name: 发布追击状态
+      #       params:
+      #         topic: "/decision_state"
+      #         data: "CHASING"
+      #         publish_every_tick: false
+
+      #     # 并行执行：追击 + 等待追击结束信号
+      #     - type: Parallel
+      #       name: 追击执行
+      #       params:
+      #         policy: SuccessOnOne
+      #         synchronise: false
+      #       children:
+      #         # 跟随 /chase_point 进行导航追击
+      #         - type: ChaseDynamicPointAction
+      #           name: 追击敌方目标
+      #           params:
+      #             server_name: "navigate_to_pose"
+      #             topic: "/chase_point"
+      #             min_target_delta: 0.25
+      #             min_resend_interval_s: 0.35
+      #         # 等待 chase 参数变为 false（追击结束）
+      #         - type: WaitForParamBool
+      #           name: 等待追击结束
+      #           params:
+      #             param: "chase"
+      #             expected: false
+
+      #     # 清除追击标记
+      #     - type: SetBlackboard
+      #       name: 清除追击标记
+      #       params:
+      #         key: "is_chasing"
+      #         value: false
+
+      #     # 发布追击结束状态
+      #     - type: PublishString
+      #       name: 发布追击结束
+      #       params:
+      #         topic: "/decision_state"
+      #         data: "CHASE_ENDED"
+      #         publish_every_tick: false
+              
       # occupy_point：固定去占点位 [-6.3, -4.31, 0]
       - type: Sequence
         name: occupy_point_占点
@@ -85,8 +160,8 @@ tree:
             params:
               server_name: "navigate_to_pose"
               frame_id: "map"
-              x: -6.3
-              y: -4.3
+              x: 4.9
+              y: -4.7
               yaw: 0.0
               timeout_s: 120
 
@@ -114,23 +189,23 @@ tree:
             params:
               server_name: "navigate_to_pose"
               frame_id: "map"
-              x: 4.2
-              y: -2.0
+              x: 4.6
+              y: -6.0
               yaw: 0.0
               timeout_s: 120
-          - type: Wait
-            name: repel点1停留
-            params:
-              duration_s: 1.0
-          - type: NavigateToPoseAction
-            name: repel点2
-            params:
-              server_name: "navigate_to_pose"
-              frame_id: "map"
-              x: -7.0
-              y: -5.0
-              yaw: 0.0
-              timeout_s: 120
+          # - type: Wait
+          #   name: repel点1停留
+          #   params:
+          #     duration_s: 1.0
+          # - type: NavigateToPoseAction
+          #   name: repel点2
+          #   params:
+          #     server_name: "navigate_to_pose"
+          #     frame_id: "map"
+          #     x: 4.4
+          #     y: -1.5
+          #     yaw: 0.0
+          #     timeout_s: 120
 
       # 兜底分支：没有任何状态命中时，短等待后下一帧继续评估
       - type: Wait

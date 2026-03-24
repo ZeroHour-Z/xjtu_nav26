@@ -11,6 +11,34 @@ tree:
     params:
       memory: false
     children:
+    # supply：回到补给点（如需修改，替换下方 x/y/yaw）
+      - type: Sequence
+        name: supply_回补给点
+        params:
+          memory: true
+        children:
+          - type: ParamBoolCondition
+            name: supply状态?
+            params:
+              param: "supply"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布supply
+            params:
+              topic: "/sentry_actions"
+              data: "SUPPLY"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去补给点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: 3.85
+              y: 0.95
+              yaw: 0.0
+              timeout_s: 120
+
       # ============ 追击分支 ============
       - type: Sequence
         name: 追击模式
@@ -63,6 +91,8 @@ tree:
                 params:
                   server_name: "navigate_to_pose"
                   topic: "/chase_point"
+                  min_target_delta: 0.25
+                  min_resend_interval_s: 0.35
               # 等待 chase 参数变为 false（追击结束）
               - type: WaitForParamBool
                 name: 等待追击结束
@@ -85,9 +115,9 @@ tree:
               data: "CHASE_ENDED"
               publish_every_tick: false
 
-      # ============ 巡逻分支（原地待命）============
+      # ============ 巡逻分支============
       - type: Sequence
-        name: 巡逻模式_原地待命
+        name: 巡逻模式
         params:
           memory: true
         children:
@@ -104,14 +134,35 @@ tree:
             name: 发布巡逻状态
             params:
               topic: "/decision_state"
-              data: "PATROL_STANDBY"
+              data: "PATROL"
               publish_every_tick: false
 
-          # 原地待命：持续等待，不执行任何导航动作
-          - type: Wait
-            name: 原地待命
+          - type: NavigateToPoseAction
+            name: 点1
             params:
-              duration_s: 999999.0
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: -1.77
+              y: 2.19
+              yaw: 0.0
+              timeout_s: 120
+              cancel_on_terminate: false
+              retry_on_failure: true
+          - type: Wait
+            name: 点1停留
+            params:
+              duration_s: 1.0
+          - type: NavigateToPoseAction
+            name: 点2
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: -3.93
+              y: -1.35
+              yaw: 0.0
+              timeout_s: 120
+              cancel_on_terminate: false
+              retry_on_failure: true
 
           # # 巡逻点2
           # - type: NavigateToPoseAction
@@ -160,4 +211,10 @@ tree:
           #   name: 等待4
           #   params:
           #     duration_s: 1.0
+      
+      # 兜底分支：没有任何状态命中时，短等待后下一帧继续评估
+      # - type: Wait
+      #   name: 未匹配状态_空转
+      #   params:
+      #     duration_s: 0.2
                   

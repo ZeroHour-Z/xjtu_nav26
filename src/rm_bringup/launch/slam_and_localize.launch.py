@@ -19,7 +19,7 @@ import os
 def generate_launch_description():
     backend_arg = DeclareLaunchArgument(
         "backend",
-        default_value="faster_lio",
+        default_value="point_lio",
         description="Backend: fast_lio | faster_lio | point_lio",
     )
     rviz_arg = DeclareLaunchArgument("rviz", default_value="true")
@@ -79,7 +79,7 @@ def generate_launch_description():
     map_arg = DeclareLaunchArgument(
         "map",
         default_value=PathJoinSubstitution(
-            [FindPackageShare("rm_bringup"), "PCD", "test", "test.pcd"]
+            [FindPackageShare("rm_bringup"), "PCD", "RMUL", "RMUL.pcd"]
         ),
     )
 

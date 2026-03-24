@@ -152,6 +152,15 @@ def generate_launch_description():
         additional_env={'LD_LIBRARY_PATH': '/usr/lib/x86_64-linux-gnu:' + os.environ.get('LD_LIBRARY_PATH', '')},
     )
 
+    # Static TF for point_lio compatibility: odom -> camera_init (identity)
+    tf_odom2camera_init = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="tf_odom2camera_init",
+        arguments=["0", "0", "0", "0", "0", "0", "odom", "camera_init"],
+        condition=IfCondition(equals(backend, "point_lio")),
+    )
+
     # Optional recording of Live/Bag topics
     bag_record_process = ExecuteProcess(
         cmd=[
@@ -198,6 +207,7 @@ def generate_launch_description():
             fast_lio_node,
             faster_lio_node,
             point_lio_ros2_node,
+            tf_odom2camera_init,
             # Data source/recording
             bag_record_process,
             # RViz
