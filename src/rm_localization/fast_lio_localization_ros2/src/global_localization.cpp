@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -14,10 +15,16 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/header.hpp>
+
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/filters/voxel_grid.h>
@@ -34,7 +41,7 @@ public:
         this->declare_parameter<bool>("map2odom_completed", false);
         this->declare_parameter<int>("region", 0);
         this->declare_parameter<double>("freq_localization", 0.5);
-        this->declare_parameter<double>("localization_th", 0.1); // MSE threshold (lower better)
+        this->declare_parameter<double>("localization_th", 0.25); // MSE threshold (lower better)
         this->declare_parameter<double>("map_voxel_size", 0.2);
         this->declare_parameter<double>("scan_voxel_size", 0.1);
         this->declare_parameter<double>("fov", 6.28);
@@ -102,6 +109,10 @@ public:
             std::bind(&GlobalLocalizationNode::cbInitialPose, this, std::placeholders::_1)
         );
 
+        // TF buffer/listener (used to convert RViz base_link pose -> map3d->odom)
+        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
         // Thread
         worker_ = std::thread(&GlobalLocalizationNode::initializeAndRun, this);
         RCLCPP_INFO(this->get_logger(), "Localization Node Inited (C++) ...");
@@ -132,6 +143,30 @@ private:
         inv.block<3, 3>(0, 0) = T.block<3, 3>(0, 0).transpose();
         inv.block<3, 1>(0, 3) = -inv.block<3, 3>(0, 0) * T.block<3, 1>(0, 3);
         return inv;
+    }
+
+    static Eigen::Matrix4d transformToMat(const geometry_msgs::msg::TransformStamped& tf) {
+        const auto& t = tf.transform.translation;
+        const auto& q = tf.transform.rotation;
+        Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.block<3, 3>(0, 0) = quat.normalized().toRotationMatrix();
+        T(0, 3) = t.x;
+        T(1, 3) = t.y;
+        T(2, 3) = t.z;
+        return T;
+    }
+
+    // Atomically pull a pending manual pose (set by the RViz callback) into the
+    // localization estimate. Returns true if a manual pose was applied.
+    bool consumePendingManualPose() {
+        std::lock_guard<std::mutex> lk(pose_mutex_);
+        if (manual_pose_pending_) {
+            T_map_to_odom_ = pending_pose_;
+            manual_pose_pending_ = false;
+            return true;
+        }
+        return false;
     }
 
     static pcl::PointCloud<pcl::PointXYZ>::Ptr
@@ -268,8 +303,16 @@ private:
         double normal_radius = std::max(0.02, 2.5 * scan_voxel);
         auto ds_scan = buildScanWithNormals(ds_scan_xyz, normal_radius);
 
-        // 使用预先降采样的全局地图
-        auto ds_map = global_map_ds_ ? global_map_ds_ : map;
+        // Register against the FOV submap (NOT the whole global map). The submap is
+        // already cropped around the current estimate; downsample it coarse-to-fine
+        // via the scale so each ICP target stays small and fast.
+        auto ds_map = (map && !map->empty())
+            ? voxelDownSampleNormals(map, std::max(0.01, map_voxel))
+            : map;
+        if (!ds_map || ds_map->empty()) {
+            // Empty target (estimate far outside the map FOV): report failure.
+            return { initial, std::numeric_limits<double>::max() };
+        }
 
         pcl::IterativeClosestPointWithNormals<pcl::PointNormal, pcl::PointNormal> icp;
         icp.setMaxCorrespondenceDistance(1.0 * scale);
@@ -298,6 +341,35 @@ private:
         msg.pose.pose.orientation.y = 0.0;
         msg.pose.pose.orientation.z = 0.0;
         pub_initialpose_->publish(msg);
+    }
+
+    void publishMapToOdom(
+        const Eigen::Matrix4d& transform,
+        const rclcpp::Time& stamp,
+        const char* reason
+    ) {
+        nav_msgs::msg::Odometry map_to_odom;
+        Eigen::Quaterniond q(transform.block<3, 3>(0, 0));
+        q.normalize();
+        map_to_odom.pose.pose.position.x = transform(0, 3);
+        map_to_odom.pose.pose.position.y = transform(1, 3);
+        map_to_odom.pose.pose.position.z = transform(2, 3);
+        map_to_odom.pose.pose.orientation.x = q.x();
+        map_to_odom.pose.pose.orientation.y = q.y();
+        map_to_odom.pose.pose.orientation.z = q.z();
+        map_to_odom.pose.pose.orientation.w = q.w();
+        map_to_odom.header.stamp = stamp;
+        map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
+        pub_map_to_odom_->publish(map_to_odom);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Published map3d->odom (%s): x=%.2f, y=%.2f, z=%.2f",
+            reason,
+            transform(0, 3),
+            transform(1, 3),
+            transform(2, 3)
+        );
     }
 
     bool globalLocalization(Eigen::Matrix4d& pose_estimation) {
@@ -336,20 +408,7 @@ private:
         double mse_th = std::max(1e-6, this->get_parameter("localization_th").as_double());
         if (mse < mse_th) {
             pose_estimation = T2;
-
-            nav_msgs::msg::Odometry map_to_odom;
-            Eigen::Quaterniond q(T2.block<3, 3>(0, 0));
-            q.normalize();
-            map_to_odom.pose.pose.position.x = T2(0, 3);
-            map_to_odom.pose.pose.position.y = T2(1, 3);
-            map_to_odom.pose.pose.position.z = T2(2, 3);
-            map_to_odom.pose.pose.orientation.x = q.x();
-            map_to_odom.pose.pose.orientation.y = q.y();
-            map_to_odom.pose.pose.orientation.z = q.z();
-            map_to_odom.pose.pose.orientation.w = q.w();
-            map_to_odom.header.stamp = cur_odom_->header.stamp;
-            map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
-            pub_map_to_odom_->publish(map_to_odom);
+            publishMapToOdom(T2, cur_odom_->header.stamp, "relocalization");
             RCLCPP_INFO(this->get_logger(), "Relocalization mse: %.6f (mse_th=%.6f)", mse, mse_th);
             return true;
         } else {
@@ -541,20 +600,7 @@ private:
         if (best_mse < mse_th) {
             T_map_to_odom_ = best_T;
             RCLCPP_INFO(this->get_logger(), "GLOBAL INIT SUCCESS!");
-
-            nav_msgs::msg::Odometry map_to_odom;
-            Eigen::Quaterniond q(best_T.block<3, 3>(0, 0));
-            q.normalize();
-            map_to_odom.pose.pose.position.x = best_T(0, 3);
-            map_to_odom.pose.pose.position.y = best_T(1, 3);
-            map_to_odom.pose.pose.position.z = best_T(2, 3);
-            map_to_odom.pose.pose.orientation.x = q.x();
-            map_to_odom.pose.pose.orientation.y = q.y();
-            map_to_odom.pose.pose.orientation.z = q.z();
-            map_to_odom.pose.pose.orientation.w = q.w();
-            map_to_odom.header.stamp = cur_odom_->header.stamp;
-            map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
-            pub_map_to_odom_->publish(map_to_odom);
+            publishMapToOdom(best_T, cur_odom_->header.stamp, "global search");
             return true;
         }
 
@@ -622,20 +668,7 @@ private:
                 "Multi-hypothesis init SUCCESS! best_mse=%.6f",
                 best_mse
             );
-
-            nav_msgs::msg::Odometry map_to_odom;
-            Eigen::Quaterniond q(best_T.block<3, 3>(0, 0));
-            q.normalize();
-            map_to_odom.pose.pose.position.x = best_T(0, 3);
-            map_to_odom.pose.pose.position.y = best_T(1, 3);
-            map_to_odom.pose.pose.position.z = best_T(2, 3);
-            map_to_odom.pose.pose.orientation.x = q.x();
-            map_to_odom.pose.pose.orientation.y = q.y();
-            map_to_odom.pose.pose.orientation.z = q.z();
-            map_to_odom.pose.pose.orientation.w = q.w();
-            map_to_odom.header.stamp = cur_odom_->header.stamp;
-            map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
-            pub_map_to_odom_->publish(map_to_odom);
+            publishMapToOdom(best_T, cur_odom_->header.stamp, "multi-hypothesis init");
             return true;
         }
 
@@ -673,11 +706,12 @@ private:
             T_map_to_odom_ = getInitialPoseFromParams();
             RCLCPP_INFO(
                 this->get_logger(),
-                "Using initial pose from parameters: x=%.2f, y=%.2f, yaw=%.2f",
+                "Using initial map3d->odom from parameters: x=%.2f, y=%.2f, yaw=%.2f",
                 this->get_parameter("initial_x").as_double(),
                 this->get_parameter("initial_y").as_double(),
                 this->get_parameter("initial_yaw").as_double()
             );
+            publishMapToOdom(T_map_to_odom_, cur_odom_->header.stamp, "initial parameters");
         }
 
         publishInitialPose();
@@ -687,6 +721,11 @@ private:
         bool initialized = false;
         while (alive_.load() && rclcpp::ok() && !initialized) {
             attempt++;
+
+            // A manual pose from RViz takes priority and is used as the seed.
+            if (consumePendingManualPose()) {
+                RCLCPP_INFO(this->get_logger(), "Applying manual pose from RViz during init");
+            }
 
             // First try direct matching
             bool ok = globalLocalization(T_map_to_odom_);
@@ -746,6 +785,8 @@ private:
             std::chrono::duration<double>(period)
         );
         while (alive_.load() && rclcpp::ok()) {
+            // Honor any manual pose set via RViz "2D Pose Estimate".
+            consumePendingManualPose();
             globalLocalization(T_map_to_odom_);
             rclcpp::sleep_for(sleep_duration);
         }
@@ -775,44 +816,70 @@ private:
         const auto& p = msg->pose.pose.position;
         const auto& q = msg->pose.pose.orientation;
 
-        // Convert to transformation matrix
+        // RViz "2D Pose Estimate" gives the desired BASE_LINK pose, expressed in
+        // the RViz fixed frame. We treat it in the localization map frame (map3d);
+        // the static map->map3d offset is a pure +Z shift that does not affect 2D.
         Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
-        Eigen::Matrix4d T_init = Eigen::Matrix4d::Identity();
-        T_init.block<3, 3>(0, 0) = quat.normalized().toRotationMatrix();
-        T_init(0, 3) = p.x;
-        T_init(1, 3) = p.y;
-        T_init(2, 3) = p.z;
+        Eigen::Matrix4d T_map_to_base = Eigen::Matrix4d::Identity();
+        T_map_to_base.block<3, 3>(0, 0) = quat.normalized().toRotationMatrix();
+        T_map_to_base(0, 3) = p.x;
+        T_map_to_base(1, 3) = p.y;
+        T_map_to_base(2, 3) = p.z;
 
-        // Update map_to_odom transform
-        if (cur_odom_) {
-            Eigen::Matrix4d T_odom_to_base = poseToMat(*cur_odom_);
-            T_map_to_odom_ = T_init * inverseSE3(T_odom_to_base);
-            RCLCPP_INFO(this->get_logger(), "Updated T_map_to_odom from RViz initial pose");
-
-            // Publish map_to_odom
-            nav_msgs::msg::Odometry map_to_odom;
-            Eigen::Quaterniond q_out(T_map_to_odom_.block<3, 3>(0, 0));
-            q_out.normalize();
-            map_to_odom.pose.pose.position.x = T_map_to_odom_(0, 3);
-            map_to_odom.pose.pose.position.y = T_map_to_odom_(1, 3);
-            map_to_odom.pose.pose.position.z = T_map_to_odom_(2, 3);
-            map_to_odom.pose.pose.orientation.x = q_out.x();
-            map_to_odom.pose.pose.orientation.y = q_out.y();
-            map_to_odom.pose.pose.orientation.z = q_out.z();
-            map_to_odom.pose.pose.orientation.w = q_out.w();
-            map_to_odom.header.stamp = this->now();
-            map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
-            pub_map_to_odom_->publish(map_to_odom);
-
-            publishInitialPose();
-        } else {
-            // If no odom available, use identity for odom_to_base
-            T_map_to_odom_ = T_init;
+        if (!cur_odom_) {
+            // No odometry yet: cannot relate base_link to odom, store click as map3d->odom.
+            {
+                std::lock_guard<std::mutex> lk(pose_mutex_);
+                pending_pose_ = T_map_to_base;
+                manual_pose_pending_ = true;
+            }
             RCLCPP_WARN(
                 this->get_logger(),
-                "No odom available, using initial pose directly as T_map_to_odom"
+                "No odom available, using initial pose directly as map3d->odom"
             );
+            publishMapToOdom(T_map_to_base, this->now(), "rviz initial pose (no odom)");
+            publishInitialPose();
+            return;
         }
+
+        // The /odom message is odom(=camera_init) -> <child> (point_lio child is
+        // "body", NOT base_link). Compose with the static <child> -> base_link
+        // transform so that the clicked pose actually places base_link.
+        Eigen::Matrix4d T_odom_to_child = poseToMat(*cur_odom_);
+        Eigen::Matrix4d T_odom_to_base = T_odom_to_child; // fallback: assume child == base_link
+        const std::string child_frame =
+            cur_odom_->child_frame_id.empty() ? std::string("body") : cur_odom_->child_frame_id;
+        const std::string base_frame = this->get_parameter("base_link_frame").as_string();
+        if (child_frame != base_frame) {
+            try {
+                auto tf_child_base = tf_buffer_->lookupTransform(
+                    child_frame,
+                    base_frame,
+                    tf2::TimePointZero,
+                    tf2::durationFromSec(0.2)
+                );
+                T_odom_to_base = T_odom_to_child * transformToMat(tf_child_base);
+            } catch (const tf2::TransformException& ex) {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "TF %s->%s lookup failed (%s); assuming base_link coincides with %s",
+                    child_frame.c_str(),
+                    base_frame.c_str(),
+                    ex.what(),
+                    child_frame.c_str()
+                );
+            }
+        }
+
+        Eigen::Matrix4d candidate = T_map_to_base * inverseSE3(T_odom_to_base);
+        {
+            std::lock_guard<std::mutex> lk(pose_mutex_);
+            pending_pose_ = candidate;
+            manual_pose_pending_ = true;
+        }
+        RCLCPP_INFO(this->get_logger(), "Updated map3d->odom from RViz initial pose");
+        publishMapToOdom(candidate, this->now(), "rviz initial pose");
+        publishInitialPose();
     }
 
     void cbInitGlobalMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -826,8 +893,6 @@ private:
         // Estimate normals with radius based on voxel size
         double normal_radius = std::max(0.02, 2.5 * voxel);
         global_map_ = buildScanWithNormals(ds_map_xyz, normal_radius);
-        // 预先降采样带法线的全局地图
-        global_map_ds_ = voxelDownSampleNormals(global_map_, std::max(0.01, voxel));
         RCLCPP_INFO(
             this->get_logger(),
             "Global map received. points=%zu (downsampled + normals)",
@@ -839,7 +904,6 @@ private:
     std::atomic<bool> alive_ { true };
     std::thread worker_;
     pcl::PointCloud<pcl::PointNormal>::Ptr global_map_;
-    pcl::PointCloud<pcl::PointNormal>::Ptr global_map_ds_; // 新增：缓存降采样后的全局地图
     pcl::PointCloud<pcl::PointXYZ>::Ptr cur_scan_;
     nav_msgs::msg::Odometry::SharedPtr cur_odom_;
 
@@ -853,7 +917,16 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_map3d_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_initialpose_;
 
+    // TF (RViz base_link pose -> map3d->odom conversion)
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
     Eigen::Matrix4d T_map_to_odom_ = Eigen::Matrix4d::Identity();
+
+    // Manual pose hand-off from the RViz callback thread to the worker thread.
+    std::mutex pose_mutex_;
+    Eigen::Matrix4d pending_pose_ = Eigen::Matrix4d::Identity();
+    bool manual_pose_pending_ = false;
 };
 
 int main(int argc, char** argv) {

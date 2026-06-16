@@ -30,7 +30,7 @@ def generate_launch_description():
     pcd_save_interval_arg = DeclareLaunchArgument("pcd_save_interval", default_value="-1")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")[2:]
     default_src_pcd_path = (
-        f"/home/xjturm/xjtu_nav25_new/src/rm_bringup/tmp/pcd_{ts}.pcd"
+        f"/home/xjturm/xjtu_nav26/src/rm_bringup/tmp/pcd_{ts}.pcd"
     )
     pcd_save_file_arg = DeclareLaunchArgument(
         "pcd_save_file",
@@ -257,13 +257,23 @@ def generate_launch_description():
         package="tf2_ros",
         executable="static_transform_publisher",
         name="tf_body2base_link",
+        # arguments=[
+        #     "0.0",
+        #     "0.12848040398218347",
+        #     "-0.2932452655927712",
+        #     "1.5707963267948966",
+        #     "0.2617993877991494",
+        #     "0",
+        #     "body",
+        #     "base_link",
+        # ],
         arguments=[
             "0.0",
-            "0.12848040398218347",
-            "-0.2932452655927712",
+            "0.0",
+            "0.0",
             "1.5707963267948966",
-            "0.2617993877991494",
-            "0",
+            "-0.2617993877991494",
+            "0.0",
             "body",
             "base_link",
         ],

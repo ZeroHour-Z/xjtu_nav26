@@ -22,6 +22,8 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		cancel_on_terminate: bool = True,
 		min_target_delta: float = 0.2,
 		min_resend_interval_s: float = 0.3,
+		publish_goal_topic: str = "",
+		publish_chase_goal_topic: str = "",
 	):
 		super().__init__(name)
 		self.node = node
@@ -36,6 +38,17 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		self._pending_pose: Optional[PoseStamped] = None
 		self._has_new_target: bool = False
 		self._last_send_time = None
+		self._goal_generation = 0
+		self._goal_pub = (
+			self.node.create_publisher(PoseStamped, publish_goal_topic, 10)
+			if publish_goal_topic
+			else None
+		)
+		self._chase_goal_pub = (
+			self.node.create_publisher(PoseStamped, publish_chase_goal_topic, 10)
+			if publish_chase_goal_topic
+			else None
+		)
 		# 在构造函数中立即创建订阅，确保能收到消息
 		self._sub = self.node.create_subscription(PoseStamped, self.topic, self._on_target, 10)
 		self.node.get_logger().info(f"ChaseDynamicPointAction: subscribed to {topic}")
@@ -84,8 +97,16 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 			# Send new goal
 			goal_msg = NavigateToPose.Goal()
 			goal_msg.pose = target_pose
+			if self._goal_pub is not None:
+				self._goal_pub.publish(target_pose)
+			if self._chase_goal_pub is not None:
+				self._chase_goal_pub.publish(target_pose)
+			self._goal_generation += 1
+			generation = self._goal_generation
 			send_future = self.client.send_goal_async(goal_msg)
-			send_future.add_done_callback(self._on_goal_response)
+			send_future.add_done_callback(
+				lambda future, generation=generation: self._on_goal_response(future, generation)
+			)
 			self._last_pose = target_pose
 			self._pending_pose = None
 			self._last_send_time = now
@@ -100,7 +121,9 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		return Status.RUNNING
 
 	def terminate(self, new_status: Status) -> None:
-		if new_status == Status.INVALID and self.cancel_on_terminate and self._goal_handle is not None:
+		if new_status != Status.RUNNING:
+			self._goal_generation += 1
+		if new_status != Status.RUNNING and self.cancel_on_terminate and self._goal_handle is not None:
 			try:
 				self._goal_handle.cancel_goal_async()
 			except Exception as exc:
@@ -121,8 +144,16 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		self._pending_pose = pose
 		self._has_new_target = True
 
-	def _on_goal_response(self, future):
-		self._goal_handle = future.result()
+	def _on_goal_response(self, future, generation: int):
+		goal_handle = future.result()
+		if generation != self._goal_generation:
+			if getattr(goal_handle, 'accepted', False):
+				try:
+					goal_handle.cancel_goal_async()
+				except Exception as exc:
+					self.node.get_logger().warn(f"Cancel stale chase goal failed: {exc}")
+			return
+		self._goal_handle = goal_handle
 		if not getattr(self._goal_handle, 'accepted', False):
 			self._result_future = None
 			# self.node.get_logger().warn("Chase goal rejected by server")

@@ -63,5 +63,5 @@
 
         pcd_save:
             pcd_save_en: True
-            interval: -1
+            interval: 10
 

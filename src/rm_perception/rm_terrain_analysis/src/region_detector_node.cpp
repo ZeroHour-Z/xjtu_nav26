@@ -10,8 +10,10 @@
  */
 
 #include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 #include <std_msgs/msg/u_int8_multi_array.hpp>
@@ -64,6 +66,9 @@ public:
         // 声明参数
         this->declare_parameter<double>("lookahead_distance", 0.5);
         this->declare_parameter<double>("publish_rate", 20.0);
+        this->declare_parameter<std::string>("plan_topic", "/plan");
+        this->declare_parameter<std::string>("chase_goal_topic", "/chase_goal_pose");
+        this->declare_parameter<double>("chase_plan_goal_tolerance", 0.75);
 
         // 颠簸区域参数（可以定义多个区域）
         // 格式：[x1, y1, x2, y2, x3, y3, ...]
@@ -75,6 +80,9 @@ public:
 
         this->declare_parameter<std::vector<double>>("fluctuate_region_3", std::vector<double> {});
         this->declare_parameter<double>("fluctuate_region_3_yaw", 0.0);
+
+        this->declare_parameter<std::vector<double>>("fluctuate_region_4", std::vector<double> {});
+        this->declare_parameter<double>("fluctuate_region_4_yaw", 0.0);
 
         // 地图三区域多边形参数（map坐标系）
         this->declare_parameter<std::vector<double>>("self_base_region", std::vector<double> {});
@@ -93,21 +101,37 @@ public:
         // 发布器
         region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/region_type", 10);
         yaw_pub_ = this->create_publisher<std_msgs::msg::Float32>("/region_yaw_desired", 10);
+        path_through_fluctuate_pub_ =
+            this->create_publisher<std_msgs::msg::Bool>("/path_through_fluctuate_region", 10);
+        chase_path_through_fluctuate_pub_ =
+            this->create_publisher<std_msgs::msg::Bool>("/chase_path_through_fluctuate_region", 10);
         target_region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/target_region", 10);
         self_region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/self_region", 10);
         marker_pub_ =
             this->create_publisher<visualization_msgs::msg::MarkerArray>("/region_markers", 10);
 
         // 订阅路径与通信包
+        this->get_parameter("plan_topic", plan_topic_);
+        this->get_parameter("chase_goal_topic", chase_goal_topic_);
+        this->get_parameter("chase_plan_goal_tolerance", chase_plan_goal_tolerance_);
+
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/plan",
+            plan_topic_,
             10,
             std::bind(&RegionDetectorNode::onPath, this, std::placeholders::_1)
         );
 
+        if (!chase_goal_topic_.empty()) {
+            chase_goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                chase_goal_topic_,
+                10,
+                std::bind(&RegionDetectorNode::onChaseGoal, this, std::placeholders::_1)
+            );
+        }
+
         rx_sub_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>(
             "/rm_comm/rx_packet",
-            100,
+            10,
             std::bind(&RegionDetectorNode::onRxPacket, this, std::placeholders::_1)
         );
 
@@ -201,6 +225,13 @@ private:
             "Fluctuate3",
             REGION_FLUCTUATE
         );
+        // 加载颠簸区域4
+        loadSingleRegion(
+            "fluctuate_region_4",
+            "fluctuate_region_4_yaw",
+            "Fluctuate4",
+            REGION_FLUCTUATE
+        );
     }
 
     void loadSingleRegion(
@@ -286,25 +317,113 @@ private:
         return min_dist;
     }
 
-    // 路径回调
-    void onPath(const nav_msgs::msg::Path::SharedPtr msg) {
-        last_path_ = *msg;
-        has_path_ = true;
+    bool computePathYawInRegion(size_t region_index, double robot_x, double robot_y, double& yaw)
+        const {
+        if (!has_path_ || region_index >= regions_.size() || last_path_.poses.size() < 2) {
+            return false;
+        }
 
-        // 检查路径经过哪些区域
-        path_regions_.clear();
+        const auto& polygon = regions_[region_index].polygon;
+        size_t closest_inside_idx = 0;
+        double closest_dist_sq = std::numeric_limits<double>::max();
+        bool found_inside = false;
+
+        for (size_t i = 0; i < last_path_.poses.size(); ++i) {
+            const auto& p = last_path_.poses[i].pose.position;
+            if (!isPointInPolygon(p.x, p.y, polygon)) {
+                continue;
+            }
+
+            const double dx = p.x - robot_x;
+            const double dy = p.y - robot_y;
+            const double dist_sq = dx * dx + dy * dy;
+            if (dist_sq < closest_dist_sq) {
+                closest_dist_sq = dist_sq;
+                closest_inside_idx = i;
+                found_inside = true;
+            }
+        }
+
+        if (!found_inside) {
+            return false;
+        }
+
+        auto segmentYaw = [&](size_t from, size_t to, double& out_yaw) {
+            const auto& a = last_path_.poses[from].pose.position;
+            const auto& b = last_path_.poses[to].pose.position;
+            const double dx = b.x - a.x;
+            const double dy = b.y - a.y;
+            if (std::hypot(dx, dy) < 1e-4) {
+                return false;
+            }
+            out_yaw = std::atan2(dy, dx);
+            return true;
+        };
+
+        for (size_t i = closest_inside_idx; i + 1 < last_path_.poses.size(); ++i) {
+            const auto& p = last_path_.poses[i + 1].pose.position;
+            if (isPointInPolygon(p.x, p.y, polygon) && segmentYaw(i, i + 1, yaw)) {
+                return true;
+            }
+        }
+
+        for (size_t i = closest_inside_idx; i > 0; --i) {
+            const auto& p = last_path_.poses[i - 1].pose.position;
+            if (isPointInPolygon(p.x, p.y, polygon) && segmentYaw(i - 1, i, yaw)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool updatePathRegions(const nav_msgs::msg::Path& path, std::set<size_t>& path_regions) const {
+        bool path_through_fluctuate = false;
+        path_regions.clear();
         for (size_t i = 0; i < regions_.size(); ++i) {
-            for (const auto& pose: msg->poses) {
+            for (const auto& pose: path.poses) {
                 if (isPointInPolygon(
                         pose.pose.position.x,
                         pose.pose.position.y,
                         regions_[i].polygon
                     ))
                 {
-                    path_regions_.insert(i);
+                    path_regions.insert(i);
+                    if (regions_[i].type == REGION_FLUCTUATE) {
+                        path_through_fluctuate = true;
+                    }
                     break;
                 }
             }
+        }
+        return path_through_fluctuate;
+    }
+
+    bool pathMatchesLatestChaseGoal(const nav_msgs::msg::Path& path) const {
+        if (!has_chase_goal_ || path.poses.empty()) {
+            return false;
+        }
+
+        const auto& end = path.poses.back().pose.position;
+        const auto& goal = latest_chase_goal_.pose.position;
+        const double dist = std::hypot(end.x - goal.x, end.y - goal.y);
+        return dist <= chase_plan_goal_tolerance_;
+    }
+
+    // 路径回调
+    void onPath(const nav_msgs::msg::Path::SharedPtr msg) {
+        last_path_ = *msg;
+        has_path_ = true;
+
+        // 普通路径状态仍然跟随 Nav2 的 /plan，用于区域预瞄和通用调试。
+        path_through_fluctuate_region_ = updatePathRegions(*msg, path_regions_);
+
+        publishPathThroughFluctuate();
+
+        if (pathMatchesLatestChaseGoal(*msg)) {
+            chase_path_through_fluctuate_region_ =
+                updatePathRegions(*msg, chase_path_regions_);
+            publishChasePathThroughFluctuate();
         }
 
         if (!path_regions_.empty()) {
@@ -316,6 +435,26 @@ private:
                 path_regions_.size()
             );
         }
+    }
+
+    void onChaseGoal(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        latest_chase_goal_ = *msg;
+        has_chase_goal_ = true;
+        chase_path_regions_.clear();
+        chase_path_through_fluctuate_region_ = false;
+        publishChasePathThroughFluctuate();
+    }
+
+    void publishPathThroughFluctuate() {
+        std_msgs::msg::Bool msg;
+        msg.data = path_through_fluctuate_region_;
+        path_through_fluctuate_pub_->publish(msg);
+    }
+
+    void publishChasePathThroughFluctuate() {
+        std_msgs::msg::Bool msg;
+        msg.data = chase_path_through_fluctuate_region_;
+        chase_path_through_fluctuate_pub_->publish(msg);
     }
 
     void onRxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
@@ -431,17 +570,20 @@ private:
             if (isPointInPolygon(robot_x, robot_y, region.polygon)) {
                 current_region = region.type;
                 yaw_desired = region.yaw_desired;
+                if (region.type == REGION_FLUCTUATE) {
+                    (void)computePathYawInRegion(i, robot_x, robot_y, yaw_desired);
+                }
                 in_special_region = true;
 
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    500,
-                    "Robot IN region '%s'! pos=(%.2f, %.2f)",
-                    region.name.c_str(),
-                    robot_x,
-                    robot_y
-                );
+                // RCLCPP_INFO_THROTTLE(
+                //     this->get_logger(),
+                //     *this->get_clock(),
+                //     500,
+                //     "Robot IN region '%s'! pos=(%.2f, %.2f)",
+                //     region.name.c_str(),
+                //     robot_x,
+                //     robot_y
+                // );
                 break;
             }
 
@@ -451,6 +593,9 @@ private:
                 if (dist < lookahead_dist) {
                     current_region = region.type;
                     yaw_desired = region.yaw_desired;
+                    if (region.type == REGION_FLUCTUATE) {
+                        (void)computePathYawInRegion(i, robot_x, robot_y, yaw_desired);
+                    }
                     in_special_region = true;
 
                     RCLCPP_INFO_THROTTLE(
@@ -475,6 +620,8 @@ private:
         std_msgs::msg::Float32 yaw_msg;
         yaw_msg.data = static_cast<float>(yaw_desired);
         yaw_pub_->publish(yaw_msg);
+        publishPathThroughFluctuate();
+        publishChasePathThroughFluctuate();
 
         if (has_enemy_pose_) {
             double enemy_map_x = 0.0;
@@ -487,17 +634,17 @@ private:
                     static_cast<float>(enemy_map_y)
                 );
                 target_region_pub_->publish(target_region_msg);
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    500,
-                    "Battle region classify (enemy): odom(%.2f, %.2f) -> map(%.2f, %.2f) => target_region=%u",
-                    latest_enemy_x_,
-                    latest_enemy_y_,
-                    enemy_map_x,
-                    enemy_map_y,
-                    static_cast<unsigned int>(target_region_msg.data)
-                );
+                // RCLCPP_INFO_THROTTLE(
+                //     this->get_logger(),
+                //     *this->get_clock(),
+                //     500,
+                //     "Battle region classify (enemy): odom(%.2f, %.2f) -> map(%.2f, %.2f) => target_region=%u",
+                //     latest_enemy_x_,
+                //     latest_enemy_y_,
+                //     enemy_map_x,
+                //     enemy_map_y,
+                //     static_cast<unsigned int>(target_region_msg.data)
+                // );
             } else {
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(),
@@ -514,15 +661,15 @@ private:
             std_msgs::msg::UInt8 self_region_msg;
             self_region_msg.data = classifyBattleRegion(latest_self_map_x_, latest_self_map_y_);
             self_region_pub_->publish(self_region_msg);
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                500,
-                "Battle region classify (self): map(%.2f, %.2f) => self_region=%u",
-                latest_self_map_x_,
-                latest_self_map_y_,
-                static_cast<unsigned int>(self_region_msg.data)
-            );
+            // RCLCPP_INFO_THROTTLE(
+            //     this->get_logger(),
+            //     *this->get_clock(),
+            //     500,
+            //     "Battle region classify (self): map(%.2f, %.2f) => self_region=%u",
+            //     latest_self_map_x_,
+            //     latest_self_map_y_,
+            //     static_cast<unsigned int>(self_region_msg.data)
+            // );
         }
 
         // 更新状态用于可视化
@@ -784,11 +931,14 @@ private:
 
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr region_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr yaw_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr path_through_fluctuate_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr chase_path_through_fluctuate_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr target_region_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr self_region_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr chase_goal_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr rx_sub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
@@ -798,6 +948,14 @@ private:
     nav_msgs::msg::Path last_path_;
     bool has_path_ { false };
     std::set<size_t> path_regions_; // 路径经过的区域索引
+    bool path_through_fluctuate_region_ { false };
+    std::set<size_t> chase_path_regions_;
+    bool chase_path_through_fluctuate_region_ { false };
+    geometry_msgs::msg::PoseStamped latest_chase_goal_;
+    bool has_chase_goal_ { false };
+    std::string plan_topic_ { "/plan" };
+    std::string chase_goal_topic_ { "/chase_goal_pose" };
+    double chase_plan_goal_tolerance_ { 0.75 };
 
     std::vector<std::pair<double, double>> self_base_polygon_;
     std::vector<std::pair<double, double>> central_polygon_;

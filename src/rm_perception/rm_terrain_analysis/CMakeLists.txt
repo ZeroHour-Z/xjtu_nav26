@@ -57,11 +57,7 @@ install(TARGETS
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}
-)
-
-install(DIRECTORY rviz
+install(DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}
 )
 

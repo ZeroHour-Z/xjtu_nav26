@@ -4,15 +4,16 @@
 """
 
 from launch import LaunchDescription
+from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
-import os
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    
-    # 参数文件路径
-    config_dir = '/home/xjturm/xjtu_nav25_new/src/rm_perception/rm_terrain_analysis/config/region_detector.yaml'
-    
+    config_dir = PathJoinSubstitution(
+        [FindPackageShare('rm_terrain_analysis'), 'config', 'region_detector.yaml']
+    )
+
     region_detector_node = Node(
         package='rm_terrain_analysis',
         executable='region_detector_node',

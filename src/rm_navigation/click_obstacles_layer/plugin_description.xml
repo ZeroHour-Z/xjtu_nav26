@@ -2,4 +2,10 @@
   <class name="click_obstacles_layer::ClickObstaclesLayer" type="click_obstacles_layer::ClickObstaclesLayer" base_class_type="nav2_costmap_2d::Layer">
     <description>Marks lethal obstacles from RViz clicked points with configurable radius</description>
   </class>
-</library> 
+  <class name="click_obstacles_layer::DynamicScanLayer" type="click_obstacles_layer::DynamicScanLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Marks non-persistent lethal obstacles from a LaserScan for global planning</description>
+  </class>
+  <class name="click_obstacles_layer::DirectionalForbiddenLayer" type="click_obstacles_layer::DirectionalForbiddenLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Marks configured polygons lethal only when the current goal approaches them in a forbidden direction</description>
+  </class>
+</library>

@@ -18,7 +18,9 @@ typedef struct { // 电控发送的命令数据
     uint8_t is_revive;
     float enemy_x; // 32位 敌方x坐标 (odom坐标系)
     float enemy_y; // 32位 敌方y坐标 (odom坐标系)
-    uint32_t reserve_1 : 24; // 32位 保留
+    uint8_t patrol_region; // 8位 巡逻区域，patrol_region_t
+    uint8_t motion_allowed; // 8位 是否允许移动（0=不允许，1=允许）
+    uint32_t reserve_1 : 8; // 16位 保留
     uint32_t reserve_2 : 32; // 32位 保留
     uint32_t reserve_3 : 32; // 32位 保留
     uint32_t reserve_4 : 32; // 32位 保留
@@ -49,7 +51,7 @@ typedef struct { // 都使用朴素机器人坐标系,前x,左y,上z
     uint8_t point_id; // 巡逻区号
     uint8_t target_region; //敌方车所在的区域
     uint8_t self_region; //自身所在的区域
-    uint8_t reserve_3; // 8位 保留
+    uint8_t chises_trapped; // 8位 1=fluctuate1/3 与 fluctuate2/4 均无法通过
     uint32_t reserve_4 : 32; // 32位保留
     uint32_t reserve_5 : 32; // 32位保留
     uint32_t reserve_6 : 32; // 32位保留
@@ -73,21 +75,34 @@ enum sentry_region {
     fluctuate,
 };
 
-enum sentry_state_e {
+typedef enum sentry_state {
     standby = 0, // 待命状态
     attack, // 进攻状态，该状态需视野中出现敌人
     patrol, // 巡逻状态，固定几个点的巡逻状态
-    stationary_defense, // 原地不动防守状态
-    constrained_defense, // 约束防守状态，适用于第一次死亡前，前哨站被击毁后
+    stationary_defense, // 原地不动防守状态，用于导航异常
+    constrained_defense, // 约束防守状态，上堡垒
     error, // 错误状态，即进入了不该进入的状态转移表
     logic, // 逻辑状态，在这里面做逻辑处理和强制状态转换
     pursuit, // 追击状态，此时追击坐标为敌人消失的坐标
-    supply, // 补给状态，弹丸打完或血量低下会进入此状态，attack、patrol、free_defense的补给状态
+    supply, // 补给状态，弹丸打完或血量低下会进入此状态
     go_attack_outpost, // 只推前哨站状态
-    hit_energy_buff, // 打符RMUL
-    occupy_point, // 站点RMUL
-    repel, // 驱赶RMUL
-};
+    hit_energy_buff, // 打符
+    rush_base, // 冲基地
+    occupy_point, // 占点,RMUL专供
+    repel, // 驱赶，RMUL专供
+} sentry_state_e;
+
+typedef enum {
+    opposite_half_, // 对方半场
+    self_half_, // 我方半场
+    self_fort_, // 我方堡垒
+    opposite_fort_, // 对方堡垒
+    self_highway_area_, // 我方高速区
+    opposite_highway_area_, // 对方高速区
+    central_highland_area_, // 中央高地
+    rebuild_outpost_, // 重建前哨站
+    opposite_base_area_, // 对方基地
+} patrol_region_t;
 
 enum sentry_event_e {
     none = 0,
@@ -122,8 +137,10 @@ static const std::map<uint8_t, std::string> state_map = {
     { sentry_state_e::error, "error" },
     { sentry_state_e::logic, "logic" },
     { sentry_state_e::pursuit, "pursuit" },
+    { sentry_state_e::supply, "supply" },
     { sentry_state_e::go_attack_outpost, "go_attack_outpost" },
     { sentry_state_e::hit_energy_buff, "hit_energy_buff" },
+    { sentry_state_e::rush_base, "rush_base" },
     { sentry_state_e::occupy_point, "occupy_point" },
     { sentry_state_e::repel, "repel" }
 };

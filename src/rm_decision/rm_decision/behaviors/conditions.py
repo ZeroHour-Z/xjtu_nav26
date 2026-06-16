@@ -10,13 +10,21 @@ from ..registry import register
 
 @register("TopicBoolCondition")
 class TopicBoolCondition(py_trees.behaviour.Behaviour):
-	def __init__(self, name: str, node: Node, topic: str, expected: bool = True, latched_ok: bool = True):
+	def __init__(
+		self,
+		name: str,
+		node: Node,
+		topic: str,
+		expected: bool = True,
+		latched_ok: bool = True,
+		default_value: Optional[bool] = None,
+	):
 		super().__init__(name)
 		self.node = node
 		self.topic = topic
 		self.expected = expected
 		self.latched_ok = latched_ok
-		self._last_value: Optional[bool] = None
+		self._last_value: Optional[bool] = None if default_value is None else bool(default_value)
 		self._sub = None
 
 	def setup(self, **kwargs) -> None:

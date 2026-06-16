@@ -19,20 +19,57 @@ def generate_launch_description():
 
     backend_arg = DeclareLaunchArgument(
         'backend',
-        default_value='point_lio',
+        default_value='faster_lio',
         description='定位后端: fast_lio, fast_lio, point_lio'
     )
 
     map_pcd_arg = DeclareLaunchArgument(
         'map_pcd',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "RMUL", "RMUL.pcd"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.pcd"]),
         description='3D 点云地图路径 (用于定位)'
     )
 
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "RMUL", "newMap.yaml"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.yaml"]),
         description='2D 栅格地图路径 (用于导航)'
+    )
+
+    pcd_save_en_arg = DeclareLaunchArgument(
+        'pcd_save_en',
+        default_value='true',
+        description='是否保存定位/建图点云 PCD'
+    )
+    pcd_save_interval_arg = DeclareLaunchArgument(
+        'pcd_save_interval',
+        default_value='-1',
+        description='PCD 保存间隔；-1 表示不按固定间隔分段'
+    )
+
+    initial_x_arg = DeclareLaunchArgument(
+        'initial_x',
+        default_value='0.0',
+        description='初始 X 位置(map坐标系)'
+    )
+    initial_y_arg = DeclareLaunchArgument(
+        'initial_y',
+        default_value='0.0',
+        description='初始 Y 位置(map坐标系)'
+    )
+    initial_z_arg = DeclareLaunchArgument(
+        'initial_z',
+        default_value='0.0',
+        description='初始 Z 位置(map坐标系)'
+    )
+    initial_yaw_arg = DeclareLaunchArgument(
+        'initial_yaw',
+        default_value='0.0',
+        description='初始航向角，单位 rad'
+    )
+    use_initial_pose_arg = DeclareLaunchArgument(
+        'use_initial_pose',
+        default_value='true',
+        description='定位是否使用 initial_x/initial_y/initial_z/initial_yaw 作为初始位姿'
     )
 
     # 子系统开关
@@ -80,7 +117,14 @@ def generate_launch_description():
         launch_arguments={
             'backend': LaunchConfiguration('backend'),
             'map': LaunchConfiguration('map_pcd'),
-            'rviz': LaunchConfiguration('rviz')
+            'rviz': LaunchConfiguration('rviz'),
+            'initial_x': LaunchConfiguration('initial_x'),
+            'initial_y': LaunchConfiguration('initial_y'),
+            'initial_z': LaunchConfiguration('initial_z'),
+            'initial_yaw': LaunchConfiguration('initial_yaw'),
+            'use_initial_pose': LaunchConfiguration('use_initial_pose'),
+            'pcd_save_en': LaunchConfiguration('pcd_save_en'),
+            'pcd_save_interval': LaunchConfiguration('pcd_save_interval'),
         }.items(),
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration('mode'), "' == 'nav'"])
@@ -205,6 +249,13 @@ def generate_launch_description():
         backend_arg,
         map_pcd_arg,
         map_yaml_arg,
+        pcd_save_en_arg,
+        pcd_save_interval_arg,
+        initial_x_arg,
+        initial_y_arg,
+        initial_z_arg,
+        initial_yaw_arg,
+        use_initial_pose_arg,
         driver_arg,
         comm_arg,
         decision_arg,

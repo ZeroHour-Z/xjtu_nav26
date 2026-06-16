@@ -19,10 +19,13 @@
 
 using namespace std::chrono_literals;
 
-// 本节点直接操作串口设备：
+// 本节点直接操作串口设备：是 PC 端唯一持有 /dev/ttyACM* 的进程，
+// 同时承载两套协议（nav 与 aimbot）的多路复用 broker：
 // - 参数：port=/dev/ttyACM0, baud=115200
-// - 订阅: /rm_comm/tx_packet (handler 打包好的 64 字节，std_msgs/String)
-// - 发布: /rm_comm/rx_packet (从串口读取的原始数据，std_msgs/String)
+// - 订阅: /rm_comm/tx_packet      (handler 打包好的 64B navInfo_t,    head=0x72 tail=0x4D)
+// - 订阅: /rm_comm/aim_tx_packet  (aimbot 打包好的 64B,                head=0x71 tail=0x4C)
+// - 发布: /rm_comm/rx_packet      (从串口读取的 navCommand_t,          head=0x72 tail=0x21)
+// - 发布: /rm_comm/aim_rx_packet  (从串口读取的 aimbot 上行 64B,       head=0x71 tail=0x4C)
 
 namespace {
 
@@ -45,12 +48,29 @@ static speed_t to_baud_constant(int baud) {
     }
 }
 
+// 64 字节定长帧。两套协议长度相同，仅靠帧头/帧尾区分。
+constexpr size_t kFrameSize = 64;
+
+constexpr uint8_t kNavHeader = 0x72;
+constexpr uint8_t kNavTailRx = 0x21; // navCommand_t 帧尾（电控 -> PC）
+constexpr uint8_t kNavTailTx = 0x4D; // navInfo_t 帧尾   （PC   -> 电控）
+
+constexpr uint8_t kAimHeader = 0x71;
+constexpr uint8_t kAimTail = 0x4C;
+// aim 两种 union 视图的 tail 位置不同：
+// MessData_AutoAim tail 在 byte[54]，MessData_WM tail 在 byte[63]。
+constexpr size_t kAimAutoTailOffset = 54;
+constexpr size_t kAimWmTailOffset = 63;
+
+static_assert(sizeof(navCommand_t) == kFrameSize, "navCommand_t must be 64 bytes");
+static_assert(sizeof(navInfo_t) == kFrameSize, "navInfo_t must be 64 bytes");
+
 } // namespace
 
 class SerialRwNode: public rclcpp::Node {
 public:
     SerialRwNode(): Node("serial_rw_node") {
-        port_ = this->declare_parameter<std::string>("port", "/dev/ttyUSB0");
+        port_ = this->declare_parameter<std::string>("port", "/dev/ttyACM0");
         baud_ = this->declare_parameter<int>("baud", 115200);
         reopen_interval_ms_ = this->declare_parameter<int>("reopen_interval_ms", 500);
         double read_loop_hz = this->declare_parameter<double>("read_loop_hz", 200.0);
@@ -64,23 +84,37 @@ public:
             idle_sleep_duration_ = std::chrono::milliseconds(1);
         }
 
+        // nav 链路
         tx_sub_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>(
             "/rm_comm/tx_packet",
             rclcpp::QoS(10).reliable(),
-            std::bind(&SerialRwNode::onTxPacket, this, std::placeholders::_1)
+            std::bind(&SerialRwNode::onNavTxPacket, this, std::placeholders::_1)
         );
 
         rx_pub_ = this->create_publisher<std_msgs::msg::UInt8MultiArray>(
             "/rm_comm/rx_packet",
             rclcpp::QoS(10).reliable()
         );
+
+        // aim 链路
+        aim_tx_sub_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>(
+            "/rm_comm/aim_tx_packet",
+            rclcpp::QoS(10).reliable(),
+            std::bind(&SerialRwNode::onAimTxPacket, this, std::placeholders::_1)
+        );
+
+        aim_rx_pub_ = this->create_publisher<std_msgs::msg::UInt8MultiArray>(
+            "/rm_comm/aim_rx_packet",
+            rclcpp::QoS(10).reliable()
+        );
+
         running_.store(true);
 
         read_thread_ = std::thread(&SerialRwNode::readLoop, this);
 
         RCLCPP_INFO(
             this->get_logger(),
-            "serial_rw_node started, port:%s, baud:%d",
+            "serial_rw_node started, port:%s, baud:%d (multi-proto: nav 0x72/0x21, aim 0x71/0x4C)",
             port_.c_str(),
             baud_
         );
@@ -95,41 +129,98 @@ public:
     }
 
 private:
-    void onTxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
-        // 严格校验：仅允许 navInfo_t 长度
-        constexpr size_t kTxPacketSize = sizeof(navInfo_t);
-        if (msg->data.size() != kTxPacketSize) {
+    // nav 下行：navInfo_t 严格长度校验
+    void onNavTxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
+        if (msg->data.size() != kFrameSize) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
                 2000,
-                "tx_packet size %zu != %zu, drop",
+                "[nav] tx_packet size %zu != %zu, drop",
                 msg->data.size(),
-                kTxPacketSize
+                kFrameSize
             );
             return;
         }
+        if (msg->data.front() != kNavHeader || msg->data.back() != kNavTailTx) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "[nav] tx_packet bad framing head=0x%02X tail=0x%02X, drop",
+                (unsigned)msg->data.front(),
+                (unsigned)msg->data.back()
+            );
+            return;
+        }
+        writeBytes(msg->data.data(), msg->data.size(), "nav");
+    }
 
+    // aim 下行：64B + head=0x71 + tail=0x4C
+    void onAimTxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
+        if (msg->data.size() != kFrameSize) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "[aim] tx_packet size %zu != %zu, drop",
+                msg->data.size(),
+                kFrameSize
+            );
+            return;
+        }
+        const bool has_aim_tail = msg->data[kAimAutoTailOffset] == kAimTail ||
+                                  msg->data[kAimWmTailOffset] == kAimTail;
+        if (msg->data.front() != kAimHeader || !has_aim_tail) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "[aim] tx_packet bad framing head=0x%02X tail@54=0x%02X tail@63=0x%02X, drop",
+                (unsigned)msg->data.front(),
+                (unsigned)msg->data[kAimAutoTailOffset],
+                (unsigned)msg->data[kAimWmTailOffset]
+            );
+            return;
+        }
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            1000,
+            "[aim] TX accepted, writing 64B to serial tail@54=0x%02X tail@63=0x%02X",
+            (unsigned)msg->data[kAimAutoTailOffset],
+            (unsigned)msg->data[kAimWmTailOffset]
+        );
+        writeBytes(msg->data.data(), msg->data.size(), "aim");
+    }
+
+    // 多线程下统一写串口入口（onNavTxPacket / onAimTxPacket 共用）
+    void writeBytes(const uint8_t* data, size_t size, const char* tag) {
         const int fd_snapshot = currentFd();
         if (fd_snapshot < 0) {
-            // 触发重连由读线程负责，此处提示
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
                 2000,
-                "serial not open; drop tx"
+                "[%s] serial not open; drop tx",
+                tag
             );
             return;
         }
 
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(msg->data.data());
-        size_t remaining = msg->data.size();
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        size_t remaining = size;
         while (remaining > 0) {
             ssize_t n = ::write(fd_snapshot, data, remaining);
             if (n < 0) {
                 if (errno == EINTR)
                     continue;
-                RCLCPP_ERROR(this->get_logger(), "write error: %s", std::strerror(errno));
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "[%s] write error: %s",
+                    tag,
+                    std::strerror(errno)
+                );
                 closeSerial();
                 return;
             }
@@ -149,7 +240,6 @@ private:
                 continue;
             }
 
-            // 读取串口数据并累积到缓冲区，进行定长分帧与严格校验
             uint8_t buf[512];
             ssize_t n = ::read(fd_snapshot, buf, sizeof(buf));
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "read n: %ld", n);
@@ -157,70 +247,21 @@ private:
             if (n > 0) {
                 rx_buffer_.insert(rx_buffer_.end(), buf, buf + n);
 
-                // 常量：仅接受 0x72 开头、0x21 结尾的 navCommand_t 帧
-                constexpr uint8_t kHeader = 0x72;
-                constexpr uint8_t kTailCommand = 0x21;
-                constexpr size_t kPktSize = sizeof(navCommand_t); // 64
-
-                // 分帧与重同步
-                while (true) {
-                    // 找到下一次帧头
-                    auto it = std::find(rx_buffer_.begin(), rx_buffer_.end(), kHeader);
-                    if (it == rx_buffer_.end()) {
-                        // 没有帧头，清空缓冲
-                        rx_buffer_.clear();
-                        break;
-                    }
-                    // 丢弃帧头之前的垃圾数据
-                    if (it != rx_buffer_.begin()) {
-                        rx_buffer_.erase(rx_buffer_.begin(), it);
-                    }
-                    // 等待完整帧
-                    if (rx_buffer_.size() < kPktSize)
-                        break;
-
-                    // 检查帧尾
-                    if (rx_buffer_[kPktSize - 1] != kTailCommand) {
-                        // 非法帧，丢弃当前帧头，继续向后搜索
-                        rx_buffer_.erase(rx_buffer_.begin());
-                        continue;
-                    }
-
-                    // 提取并发布
-                    navCommand_t n_data;
-                    std::memcpy(&n_data, rx_buffer_.data(), kPktSize);
-
-                    // 打印从电控收到的数据（tail:0x21）
-                    RCLCPP_INFO_THROTTLE(
-                        this->get_logger(),
-                        *this->get_clock(),
-                        1000,
-                        "RX -> Color:%d State:%d HP:%d Bullet:%d Enemy_x:%f Enemy_y:%f is_revive:%d Target_x:%f Target_y:%f",
-                        (int)n_data.color,
-                        (int)n_data.eSentryState,
-                        (int)n_data.hp_remain,
-                        (int)n_data.bullet_remain,
-                        n_data.enemy_x,
-                        n_data.enemy_y,
-                        (int)n_data.is_revive,
-                        n_data.target_x,
-                        n_data.target_y
-                    );
-
-                    std_msgs::msg::UInt8MultiArray out_msg;
-                    const uint8_t* byte_ptr = reinterpret_cast<const uint8_t*>(&n_data);
-                    out_msg.data.assign(byte_ptr, byte_ptr + kPktSize);
-                    rx_pub_->publish(out_msg);
-
-                    // 移除已消费帧
-                    rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + kPktSize);
+                // 防止缓冲区无限增长（正常情况下 < 几百字节）
+                constexpr size_t kMaxBufferSize = 4096;
+                if (rx_buffer_.size() > kMaxBufferSize) {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 2000,
+                        "rx_buffer_ overflow (%zu bytes), clearing", rx_buffer_.size());
+                    rx_buffer_.clear();
+                    continue;
                 }
 
+                parseAndDispatch();
                 continue;
             }
 
             if (n == 0) {
-                // 无数据，稍作等待
                 std::this_thread::sleep_for(idle_sleep_duration_);
                 continue;
             }
@@ -237,6 +278,101 @@ private:
             RCLCPP_WARN(this->get_logger(), "read error: %s", std::strerror(errno));
             closeSerial();
             std::this_thread::sleep_for(std::chrono::milliseconds(reopen_interval_ms_));
+        }
+    }
+
+    // 在 rx_buffer_ 中找下一个 nav/aim 候选帧头并校验帧尾，分别发布
+    void parseAndDispatch() {
+        while (true) {
+            // 找下一个等于 nav 或 aim 帧头的字节
+            auto it = std::find_if(
+                rx_buffer_.begin(),
+                rx_buffer_.end(),
+                [](uint8_t b) { return b == kNavHeader || b == kAimHeader; }
+            );
+            if (it == rx_buffer_.end()) {
+                rx_buffer_.clear();
+                return;
+            }
+            if (it != rx_buffer_.begin()) {
+                rx_buffer_.erase(rx_buffer_.begin(), it);
+            }
+            if (rx_buffer_.size() < kFrameSize) {
+                return; // 等待数据
+            }
+
+            const uint8_t header = rx_buffer_.front();
+
+            bool ok = false;
+            if (header == kNavHeader && rx_buffer_[kFrameSize - 1] == kNavTailRx) {
+                ok = true;
+            } else if (header == kAimHeader) {
+                // 兼容性：aim 两种结构 tail 分别在 byte[54]/byte[63]；
+                // 若电控未填 tail，则用
+                // "下一字节是另一个合法帧头(0x71/0x72)" 作为 64B 边界校验。
+                // 这样既能恢复链路，又能在帧间错位时拒收以重同步。
+                if (rx_buffer_[kAimAutoTailOffset] == kAimTail ||
+                    rx_buffer_[kAimWmTailOffset] == kAimTail) {
+                    ok = true;
+                } else if (rx_buffer_.size() >= kFrameSize + 1) {
+                    const uint8_t next = rx_buffer_[kFrameSize];
+                    if (next == kNavHeader || next == kAimHeader) {
+                        ok = true;
+                        RCLCPP_WARN_ONCE(
+                            this->get_logger(),
+                            "[aim] tail byte[54]=0x%02X byte[63]=0x%02X != 0x4C; accepting based on "
+                            "64B alignment (next head=0x%02X). MCU should write "
+                            "frame tail for stricter validation.",
+                            (unsigned)rx_buffer_[kAimAutoTailOffset],
+                            (unsigned)rx_buffer_[kAimWmTailOffset],
+                            (unsigned)next
+                        );
+                    }
+                } else {
+                    // 还没收到下一帧首字节，等待更多数据再判断
+                    return;
+                }
+            }
+
+            if (!ok) {
+                // 当前候选帧头与帧尾不匹配 -> 丢弃 1 字节继续重同步
+                rx_buffer_.erase(rx_buffer_.begin());
+                continue;
+            }
+
+            std_msgs::msg::UInt8MultiArray out_msg;
+            out_msg.data.assign(rx_buffer_.begin(), rx_buffer_.begin() + kFrameSize);
+
+            if (header == kNavHeader) {
+                navCommand_t n_data;
+                std::memcpy(&n_data, rx_buffer_.data(), kFrameSize);
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    1000,
+                    "[nav] RX Color:%d State:%d Region:%d HP:%d Bullet:%d Enemy:(%.2f,%.2f) Target:(%.2f,%.2f)",
+                    (int)n_data.color,
+                    (int)n_data.eSentryState,
+                    (int)n_data.patrol_region,
+                    (int)n_data.hp_remain,
+                    (int)n_data.bullet_remain,
+                    n_data.enemy_x,
+                    n_data.enemy_y,
+                    n_data.target_x,
+                    n_data.target_y
+                );
+                rx_pub_->publish(out_msg);
+            } else {
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    1000,
+                    "[aim] RX 64B head=0x71 tail=0x4C"
+                );
+                aim_rx_pub_->publish(out_msg);
+            }
+
+            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + kFrameSize);
         }
     }
 
@@ -265,19 +401,18 @@ private:
         // 配置 8N1，无流控，原始模式
         cfmakeraw(&tio);
         tio.c_cflag |= (CLOCAL | CREAD);
-        tio.c_cflag &= ~CRTSCTS; // 无硬件流控
-        tio.c_cflag &= ~CSTOPB; // 1 个停止位
-        tio.c_cflag &= ~PARENB; // 无校验
+        tio.c_cflag &= ~CRTSCTS;
+        tio.c_cflag &= ~CSTOPB;
+        tio.c_cflag &= ~PARENB;
         tio.c_cflag &= ~CSIZE;
-        tio.c_cflag |= CS8; // 8 位
+        tio.c_cflag |= CS8;
 
         speed_t spd = to_baud_constant(baud_);
         cfsetispeed(&tio, spd);
         cfsetospeed(&tio, spd);
 
-        // 读阻塞条件：至少 1 字节即可返回
         tio.c_cc[VMIN] = 1;
-        tio.c_cc[VTIME] = 1; // 0.1s 单位，设置 1 即 ~100ms 超时
+        tio.c_cc[VTIME] = 1;
 
         if (tcsetattr(fd, TCSANOW, &tio) != 0) {
             RCLCPP_ERROR(this->get_logger(), "tcsetattr failed: %s", std::strerror(errno));
@@ -285,7 +420,6 @@ private:
             return false;
         }
 
-        // 设为阻塞模式，结合 VMIN/VTIME 控制
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags >= 0) {
             fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
@@ -322,10 +456,13 @@ private:
 
     rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr tx_sub_;
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr rx_pub_;
+    rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr aim_tx_sub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr aim_rx_pub_;
 
     std::thread read_thread_;
     std::atomic<bool> running_ { false };
     mutable std::mutex fd_mutex_;
+    std::mutex write_mutex_;
     int fd_ { -1 };
     std::vector<uint8_t> rx_buffer_;
 

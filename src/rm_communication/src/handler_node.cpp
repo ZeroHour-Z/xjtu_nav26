@@ -17,10 +17,10 @@
 #include <cstring>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/parameter_client.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <stdexcept>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
@@ -42,12 +42,32 @@ public:
         this->declare_parameter<std::string>("chase_topic", "/chase_point");
         this->declare_parameter<std::string>("map_frame", "map");
         this->declare_parameter<bool>("enable_chase", true); // 是否启用追击功能
+        this->declare_parameter<std::string>("cmd_vel_frame", "map");
+        this->declare_parameter<std::string>("angular_z_mode", "yaw_angle");
+        this->declare_parameter<double>("yaw_rate_preview_time", 0.15);
+        this->declare_parameter<bool>("smooth_world_velocity", true);
+        this->declare_parameter<double>("world_velocity_filter_tau", 0.12);
+        this->declare_parameter<double>("world_velocity_accel_limit", 1.2);
 
         chase_min_distance_ = this->get_parameter("chase_min_distance").as_double();
         stop_distance_threshold_ = this->get_parameter("stop_distance_threshold").as_double();
         chase_topic_ = this->get_parameter("chase_topic").as_string();
         map_frame_ = this->get_parameter("map_frame").as_string();
         enable_chase_ = this->get_parameter("enable_chase").as_bool();
+        cmd_vel_frame_ = this->get_parameter("cmd_vel_frame").as_string();
+        angular_z_mode_ = this->get_parameter("angular_z_mode").as_string();
+        yaw_rate_preview_time_ = this->get_parameter("yaw_rate_preview_time").as_double();
+        smooth_world_velocity_ = this->get_parameter("smooth_world_velocity").as_bool();
+        world_velocity_filter_tau_ = this->get_parameter("world_velocity_filter_tau").as_double();
+        world_velocity_accel_limit_ =
+            this->get_parameter("world_velocity_accel_limit").as_double();
+
+        if (cmd_vel_frame_ != "base_link" && cmd_vel_frame_ != "map") {
+            throw std::runtime_error("cmd_vel_frame must be 'base_link' or 'map'");
+        }
+        if (angular_z_mode_ != "yaw_rate" && angular_z_mode_ != "yaw_angle") {
+            throw std::runtime_error("angular_z_mode must be 'yaw_rate' or 'yaw_angle'");
+        }
 
         // 发布器
         patrol_group_pub_ = this->create_publisher<std_msgs::msg::String>("/patrol_group", 10);
@@ -62,7 +82,7 @@ public:
         // 电控数据订阅
         rx_sub_ = this->create_subscription<std_msgs::msg::UInt8MultiArray>(
             "/rm_comm/rx_packet",
-            100,
+            10,
             std::bind(&HandlerNode::onRxPacket, this, std::placeholders::_1)
         );
 
@@ -71,13 +91,6 @@ public:
             "/cmd_vel",
             10,
             std::bind(&HandlerNode::onCmdVel, this, std::placeholders::_1)
-        );
-
-        // 里程计订阅
-        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/odom",
-            10,
-            std::bind(&HandlerNode::onOdom, this, std::placeholders::_1)
         );
 
         // 目标点订阅
@@ -113,32 +126,38 @@ public:
         );
 
         // 声明参数
-        this->declare_parameter<double>("tx_hz", 100.0);
+        this->declare_parameter<double>("tx_hz", 50.0);
         this->declare_parameter<double>("target_x", 0.0);
         this->declare_parameter<double>("target_y", 0.0);
         this->declare_parameter<double>("yaw_desired", 0.0);
 
-        double hz = 100.0;
+        double hz = 50.0;
         this->get_parameter("tx_hz", hz);
         tx_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, hz))),
             std::bind(&HandlerNode::publishTxPacket, this)
         );
 
-        // 定时更新 map 坐标系下的航向角（200Hz 以应对高速陀螺旋转）
+        // 定时更新位姿（50Hz 足够，降低 CPU 占用）
         tf_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(5), // 200Hz 更新 TF
+            std::chrono::milliseconds(20), // 50Hz
             std::bind(&HandlerNode::updateMapYaw, this)
         );
 
-        RCLCPP_INFO(this->get_logger(), "handler_node started");
+        RCLCPP_INFO(
+            this->get_logger(),
+            "handler_node started, cmd_vel_frame=%s, angular_z_mode=%s",
+            cmd_vel_frame_.c_str(),
+            angular_z_mode_.c_str()
+        );
     }
 
     ~HandlerNode() override = default;
 
 private:
-    // map 坐标系下的航向角和角速度
+    // map 坐标系下的航向角和角速度（map→base_link，用于速度坐标系变换）
     double yaw_in_map_ { 0.0 };
+    double yaw_in_map_body_ { 0.0 };  // map→body，用于发给电控的 yaw_current
     double prev_yaw_in_map_ { 0.0 };
     double estimated_wz_ { 0.0 };
     rclcpp::Time prev_tf_time_;
@@ -168,8 +187,9 @@ private:
         nav_info_.self_region = msg->data;
     }
 
-    // 定时从 TF 更新 map 坐标系下的航向角
+    // 定时从 TF 更新位姿：位置、航向角、角速度估计
     void updateMapYaw() {
+        // map→base_link：用于速度坐标系变换（底盘 x 轴对齐 base_link）
         try {
             auto tf = tf_buffer_.lookupTransform("map", "base_link", tf2::TimePointZero);
             tf2::Quaternion q;
@@ -200,33 +220,108 @@ private:
         } catch (const tf2::TransformException& ex) {
             // TF not ready yet
         }
+
+        // map→body：发给电控的 yaw_current（map 系本质是建图时的冻结 odom）
+        try {
+            auto tf_body = tf_buffer_.lookupTransform("map", "body", tf2::TimePointZero);
+            tf2::Quaternion qb;
+            qb.setX(tf_body.transform.rotation.x);
+            qb.setY(tf_body.transform.rotation.y);
+            qb.setZ(tf_body.transform.rotation.z);
+            qb.setW(tf_body.transform.rotation.w);
+            double rb, pb, yb;
+            tf2::Matrix3x3(qb).getRPY(rb, pb, yb);
+            yaw_in_map_body_ = yb;
+        } catch (const tf2::TransformException&) {
+            // map→body not available yet
+        }
+
+        // 从 odom→body TF 获取当前位置（odom帧）
+        try {
+            auto odom_tf = tf_buffer_.lookupTransform("odom", "body", tf2::TimePointZero);
+            nav_info_.x_current = static_cast<float>(odom_tf.transform.translation.x);
+            nav_info_.y_current = static_cast<float>(odom_tf.transform.translation.y);
+        } catch (const tf2::TransformException&) {
+            // odom→body not available yet
+        }
+        nav_info_.yaw_current = static_cast<float>(yaw_in_map_body_);
     }
 
     void onCmdVel(const geometry_msgs::msg::Twist::SharedPtr msg) {
-        const double vx_map = msg->linear.x;
-        const double vy_map = msg->linear.y;
+        const double vx = msg->linear.x;
+        const double vy = msg->linear.y;
 
-        // 预测未来的航向角（补偿延迟）
-        const double predict_time = 0.025;
-        double predicted_yaw = yaw_in_map_ + estimated_wz_ * predict_time;
+        if (std::abs(vx) < 1e-4 && std::abs(vy) < 1e-4) {
+            nav_info_.x_speed = 0.0f;
+            nav_info_.y_speed = 0.0f;
+            smoothed_world_vx_ = 0.0;
+            smoothed_world_vy_ = 0.0;
+            has_smoothed_world_velocity_ = false;
+        } else if (cmd_vel_frame_ == "base_link") {
+            // Nav2 标准 Twist: linear 在 base_link 坐标系下，angular.z 是角速度。
+            double vx_base = vx;
+            double vy_base = vy;
+            if (smooth_world_velocity_) {
+                filterBaseCommandInWorldFrame(vx_base, vy_base);
+            }
+            nav_info_.x_speed = static_cast<float>(vx_base);
+            nav_info_.y_speed = static_cast<float>(vy_base);
+        } else {
+            // 旧 GVC 链路: linear 是 map 坐标系速度，需要转换到电控使用的机器人坐标系。
+            const double predict_time = 0.025;
+            double predicted_yaw = yaw_in_map_ + estimated_wz_ * predict_time;
+            const double cos_yaw = std::cos(predicted_yaw);
+            const double sin_yaw = std::sin(predicted_yaw);
+            nav_info_.x_speed = static_cast<float>(cos_yaw * vx + sin_yaw * vy);
+            nav_info_.y_speed = static_cast<float>(-sin_yaw * vx + cos_yaw * vy);
+        }
 
-        const double cos_yaw = std::cos(predicted_yaw);
-        const double sin_yaw = std::sin(predicted_yaw);
-
-        // map 坐标系 -> base_link 坐标系
-        nav_info_.x_speed = static_cast<float>(cos_yaw * vx_map + sin_yaw * vy_map);
-        nav_info_.y_speed = static_cast<float>(-sin_yaw * vx_map + cos_yaw * vy_map);
-        nav_info_.yaw_desired = msg->angular.z;
+        if (angular_z_mode_ == "yaw_rate") {
+            nav_info_.yaw_desired =
+                static_cast<float>(normalizeAngle(yaw_in_map_ + msg->angular.z * yaw_rate_preview_time_));
+        } else {
+            nav_info_.yaw_desired = static_cast<float>(normalizeAngle(msg->angular.z));
+        }
     }
 
-    void onOdom(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        nav_info_.x_current = static_cast<float>(msg->pose.pose.position.x);
-        nav_info_.y_current = static_cast<float>(msg->pose.pose.position.y);
+    void filterBaseCommandInWorldFrame(double& vx_base, double& vy_base) {
+        const rclcpp::Time now = this->now();
+        const double cos_yaw = std::cos(yaw_in_map_);
+        const double sin_yaw = std::sin(yaw_in_map_);
 
-        const auto& q = msg->pose.pose.orientation;
-        double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-        double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-        nav_info_.yaw_current = static_cast<float>(std::atan2(siny_cosp, cosy_cosp));
+        double target_world_vx = cos_yaw * vx_base - sin_yaw * vy_base;
+        double target_world_vy = sin_yaw * vx_base + cos_yaw * vy_base;
+
+        if (!has_smoothed_world_velocity_) {
+            smoothed_world_vx_ = target_world_vx;
+            smoothed_world_vy_ = target_world_vy;
+            last_cmd_filter_time_ = now;
+            has_smoothed_world_velocity_ = true;
+        } else {
+            double dt = (now - last_cmd_filter_time_).seconds();
+            last_cmd_filter_time_ = now;
+            dt = std::clamp(dt, 1e-3, 0.1);
+
+            const double alpha = dt / (std::max(world_velocity_filter_tau_, 1e-3) + dt);
+            target_world_vx = smoothed_world_vx_ + alpha * (target_world_vx - smoothed_world_vx_);
+            target_world_vy = smoothed_world_vy_ + alpha * (target_world_vy - smoothed_world_vy_);
+
+            const double max_delta = std::max(world_velocity_accel_limit_, 0.1) * dt;
+            double dvx = target_world_vx - smoothed_world_vx_;
+            double dvy = target_world_vy - smoothed_world_vy_;
+            const double delta_norm = std::hypot(dvx, dvy);
+            if (delta_norm > max_delta && delta_norm > 1e-6) {
+                const double scale = max_delta / delta_norm;
+                dvx *= scale;
+                dvy *= scale;
+            }
+
+            smoothed_world_vx_ += dvx;
+            smoothed_world_vy_ += dvy;
+        }
+
+        vx_base = cos_yaw * smoothed_world_vx_ + sin_yaw * smoothed_world_vy_;
+        vy_base = -sin_yaw * smoothed_world_vx_ + cos_yaw * smoothed_world_vy_;
     }
 
     void onGoalPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -279,8 +374,11 @@ private:
         // 根据电控状态更新行为树参数
         updateBehaviorTreeParams(received_cmd);
 
-        // 发布导航目标点（使用电控下发的 target_x/target_y）
-        publishChasePoint(received_cmd);
+        if (received_cmd.eSentryState == sentry_state_e::attack
+            || received_cmd.eSentryState == sentry_state_e::pursuit) {
+            // 发布追击目标点（使用电控下发的 target_x/target_y）
+            publishChasePoint(received_cmd);
+        }
     }
 
     // 根据电控状态更新行为树参数
@@ -317,8 +415,38 @@ private:
         bool patrol_enabled = (cmd.eSentryState == sentry_state_e::patrol);
         bool standby_enabled = (cmd.eSentryState == sentry_state_e::standby);
         bool supply_enabled = (cmd.eSentryState == sentry_state_e::supply);
+        bool constrained_defense_enabled =
+            (cmd.eSentryState == sentry_state_e::constrained_defense);
+        bool go_attack_outpost_enabled = (cmd.eSentryState == sentry_state_e::go_attack_outpost);
+        bool rush_base_enabled = (cmd.eSentryState == sentry_state_e::rush_base);
+        bool hit_energy_buff_enabled = (cmd.eSentryState == sentry_state_e::hit_energy_buff);
         bool occupy_point_enabled = (cmd.eSentryState == sentry_state_e::occupy_point);
         bool repel_enabled = (cmd.eSentryState == sentry_state_e::repel);
+
+        if (cmd.eSentryState != last_bt_param_state_) {
+            last_bt_param_state_ = cmd.eSentryState;
+            const auto state_it = state_map.find(cmd.eSentryState);
+            const std::string state_name =
+                state_it == state_map.end() ? "unknown" : state_it->second;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "BT state update: state=%u(%s), chase=%s, patrol=%s, standby=%s, supply=%s, "
+                "constrained_defense=%s, go_attack_outpost=%s, rush_base=%s, "
+                "hit_energy_buff=%s, occupy_point=%s, repel=%s",
+                cmd.eSentryState,
+                state_name.c_str(),
+                chase_enabled ? "true" : "false",
+                patrol_enabled ? "true" : "false",
+                standby_enabled ? "true" : "false",
+                supply_enabled ? "true" : "false",
+                constrained_defense_enabled ? "true" : "false",
+                go_attack_outpost_enabled ? "true" : "false",
+                rush_base_enabled ? "true" : "false",
+                hit_energy_buff_enabled ? "true" : "false",
+                occupy_point_enabled ? "true" : "false",
+                repel_enabled ? "true" : "false"
+            );
+        }
 
         // 设置行为树参数
         std::vector<rclcpp::Parameter> params = {
@@ -326,8 +454,14 @@ private:
             rclcpp::Parameter("patrol", patrol_enabled),
             rclcpp::Parameter("standby", standby_enabled),
             rclcpp::Parameter("supply", supply_enabled),
+            rclcpp::Parameter("constrained_defense", constrained_defense_enabled),
+            rclcpp::Parameter("constrained_defence", constrained_defense_enabled),
+            rclcpp::Parameter("go_attack_outpost", go_attack_outpost_enabled),
+            rclcpp::Parameter("rush_base", rush_base_enabled),
+            rclcpp::Parameter("hit_energy_buff", hit_energy_buff_enabled),
             rclcpp::Parameter("occupy_point", occupy_point_enabled),
             rclcpp::Parameter("repel", repel_enabled),
+            rclcpp::Parameter("patrol_region", static_cast<int>(cmd.patrol_region)),
             rclcpp::Parameter("hp", static_cast<double>(cmd.hp_remain)),
             rclcpp::Parameter("ammo", static_cast<double>(cmd.bullet_remain)),
         };
@@ -338,26 +472,34 @@ private:
                 this->get_logger(),
                 *this->get_clock(),
                 1000,
-                "Set BT params: chase=%s, patrol=%s, standby=%s, supply=%s, occupy_point=%s, repel=%s, hp=%u, ammo=%u, state=%d, region=%d",
+                "Set BT params: chase=%s, patrol=%s, standby=%s, supply=%s, "
+                "constrained_defense=%s, go_attack_outpost=%s, rush_base=%s, "
+                "hit_energy_buff=%s, occupy_point=%s, repel=%s, hp=%u, ammo=%u, "
+                "state=%d, patrol_region=%u, terrain_region=%d",
                 chase_enabled ? "true" : "false",
                 patrol_enabled ? "true" : "false",
                 standby_enabled ? "true" : "false",
                 supply_enabled ? "true" : "false",
+                constrained_defense_enabled ? "true" : "false",
+                go_attack_outpost_enabled ? "true" : "false",
+                rush_base_enabled ? "true" : "false",
+                hit_energy_buff_enabled ? "true" : "false",
                 occupy_point_enabled ? "true" : "false",
                 repel_enabled ? "true" : "false",
                 cmd.hp_remain,
                 cmd.bullet_remain,
                 static_cast<int>(cmd.eSentryState),
+                static_cast<unsigned int>(cmd.patrol_region),
                 current_region_
             );
         } catch (const std::exception& e) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                2000,
-                "Failed to set BT params: %s",
-                e.what()
-            );
+            // RCLCPP_WARN_THROTTLE(
+            //     this->get_logger(),
+            //     *this->get_clock(),
+            //     2000,
+            //     "Failed to set BT params: %s",
+            //     e.what()
+            // );
         }
 
         // 根据巡逻状态发布巡逻组
@@ -382,14 +524,14 @@ private:
 
                 chase_point_pub_->publish(patrol_stop_pose);
 
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    500,
-                    "Patrol mode: Published current position to clear previous nav goal: map(%.2f, %.2f)",
-                    patrol_stop_pose.pose.position.x,
-                    patrol_stop_pose.pose.position.y
-                );
+                // RCLCPP_INFO_THROTTLE(
+                //     this->get_logger(),
+                //     *this->get_clock(),
+                //     500,
+                //     "Patrol mode: Published current position to clear previous nav goal: map(%.2f, %.2f)",
+                //     patrol_stop_pose.pose.position.x,
+                //     patrol_stop_pose.pose.position.y
+                // );
             } catch (const tf2::TransformException& ex) {
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(),
@@ -403,26 +545,6 @@ private:
 
         // 记录状态变化
         if (cmd.eSentryState != last_sentry_state_) {
-            const char* state_names[] = { "standby",
-                                          "attack",
-                                          "patrol",
-                                          "stationary_defense",
-                                          "constrained_defense",
-                                          "error",
-                                          "logic",
-                                          "pursuit",
-                                          "supply",
-                                          "go_attack_outpost",
-                                          "hit_energy_buff",
-                                          "occupy_point",
-                                          "repel" };
-            int state_idx = static_cast<int>(cmd.eSentryState);
-            const char* state_name =
-                (state_idx >= 0
-                 && state_idx < static_cast<int>(sizeof(state_names) / sizeof(state_names[0])))
-                ? state_names[state_idx]
-                : "unknown";
-            RCLCPP_INFO(this->get_logger(), "Sentry state changed: %s (%d)", state_name, state_idx);
             last_sentry_state_ = static_cast<sentry_state_e>(cmd.eSentryState);
         }
     }
@@ -443,19 +565,19 @@ private:
         double distance_in_odom = std::sqrt(dx_odom * dx_odom + dy_odom * dy_odom);
 
         if (distance_in_odom < stop_distance_threshold_) {
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                500,
-                "Stop command detected: target odom(%.2f, %.2f) ≈ current odom(%.2f, %.2f), dist=%.3fm - Publishing current position as stop target",
-                cmd.target_x,
-                cmd.target_y,
-                nav_info_.x_current,
-                nav_info_.y_current,
-                distance_in_odom
-            );
+            // RCLCPP_INFO_THROTTLE(
+            //     this->get_logger(),
+            //     *this->get_clock(),
+            //     500,
+            //     "Stop command detected: target odom(%.2f, %.2f) ≈ current odom(%.2f, %.2f), dist=%.3fm - Publishing current position as stop target",
+            //     cmd.target_x,
+            //     cmd.target_y,
+            //     nav_info_.x_current,
+            //     nav_info_.y_current,
+            //     distance_in_odom
+            // );
 
-            // 【关键修改】主动发布当前位置作为目标点，让车立即停止
+            // 主动发布当前位置作为目标点，让车立即停止
             // 获取当前车体在 map 坐标系下的位置
             try {
                 auto current_tf =
@@ -472,14 +594,14 @@ private:
 
                 chase_point_pub_->publish(stop_pose);
 
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    500,
-                    "Published STOP target at current position: map(%.2f, %.2f)",
-                    stop_pose.pose.position.x,
-                    stop_pose.pose.position.y
-                );
+                // RCLCPP_INFO_THROTTLE(
+                //     this->get_logger(),
+                //     *this->get_clock(),
+                //     500,
+                //     "Published STOP target at current position: map(%.2f, %.2f)",
+                //     stop_pose.pose.position.x,
+                //     stop_pose.pose.position.y
+                // );
             } catch (const tf2::TransformException& ex) {
                 RCLCPP_WARN_THROTTLE(
                     this->get_logger(),
@@ -541,19 +663,19 @@ private:
         this->set_parameter(rclcpp::Parameter("target_x", target_map_x));
         this->set_parameter(rclcpp::Parameter("target_y", target_map_y));
 
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            500,
-            "Published chase point: odom(%.2f, %.2f) -> map(%.2f, %.2f), self_odom(%.2f, %.2f), dist=%.2fm",
-            cmd.target_x,
-            cmd.target_y,
-            target_map_x,
-            target_map_y,
-            nav_info_.x_current,
-            nav_info_.y_current,
-            distance_in_odom
-        );
+        // RCLCPP_INFO_THROTTLE(
+        //     this->get_logger(),
+        //     *this->get_clock(),
+        //     500,
+        //     "Published chase point: odom(%.2f, %.2f) -> map(%.2f, %.2f), self_odom(%.2f, %.2f), dist=%.2fm",
+        //     cmd.target_x,
+        //     cmd.target_y,
+        //     target_map_x,
+        //     target_map_y,
+        //     nav_info_.x_current,
+        //     nav_info_.y_current,
+        //     distance_in_odom
+        // );
     }
 
     void publishTxPacket() {
@@ -561,18 +683,14 @@ private:
         nav_info_.frame_tail = 0x4D;
 
         // 使用 region_detector 发布的区域类型
-        nav_info_.sentry_region = current_region_;
+        // 注意：颠簸区域（fluctuate）对电控上报为 hole，保持行为一致
+        nav_info_.sentry_region = (current_region_ == sentry_region::fluctuate)
+            ? static_cast<uint8_t>(sentry_region::hole)
+            : current_region_;
 
-        // 如果在特殊区域（如颠簸区域），使用区域指定的航向角
+        // fluctuate 仍按 hole 上报给电控，航向使用 region_detector 从区域内路径段计算出的切向角。
         if (region_active_ && current_region_ == sentry_region::fluctuate) {
             nav_info_.yaw_desired = region_yaw_desired_;
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                1000,
-                "In fluctuate region, yaw_desired=%.2f",
-                region_yaw_desired_
-            );
         }
 
         double target_x = 0.0, target_y = 0.0;
@@ -608,6 +726,14 @@ private:
         tx_pub_->publish(out_msg);
     }
 
+    static double normalizeAngle(double angle) {
+        while (angle > M_PI)
+            angle -= 2.0 * M_PI;
+        while (angle < -M_PI)
+            angle += 2.0 * M_PI;
+        return angle;
+    }
+
     // 发布器
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr tx_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr patrol_group_pub_;
@@ -619,7 +745,6 @@ private:
     // 订阅器
     rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr rx_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr region_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr region_yaw_sub_;
@@ -637,12 +762,23 @@ private:
     // 数据
     navInfo_t nav_info_ {};
     navCommand_t last_cmd_ {};
+    uint8_t last_bt_param_state_ { 255 };
 
     // 追击相关参数
-    double chase_min_distance_ { 0.25 }; // 自身与敌人的最小追击距离
-    double stop_distance_threshold_ { 0.05 }; // 判定停车指令阈值
+    double chase_min_distance_ { 0.25 };
+    double stop_distance_threshold_ { 0.05 };
     std::string chase_topic_ { "/chase_point" };
     std::string map_frame_ { "map" };
+    std::string cmd_vel_frame_ { "map" };
+    std::string angular_z_mode_ { "yaw_angle" };
+    double yaw_rate_preview_time_ { 0.15 };
+    bool smooth_world_velocity_ { true };
+    double world_velocity_filter_tau_ { 0.12 };
+    double world_velocity_accel_limit_ { 1.2 };
+    bool has_smoothed_world_velocity_ { false };
+    double smoothed_world_vx_ { 0.0 };
+    double smoothed_world_vy_ { 0.0 };
+    rclcpp::Time last_cmd_filter_time_;
     bool enable_chase_ { true };
 
     // BT 节点参数客户端

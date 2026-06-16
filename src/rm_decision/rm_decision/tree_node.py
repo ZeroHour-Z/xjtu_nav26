@@ -18,12 +18,53 @@ from .loader import build_root_from_yaml
 
 class BTNode(Node):
 	def __init__(self):
-		super().__init__('rm_bt_decision_node')
-		self.declare_parameter('tree_config', '')
-		self.declare_parameter('tick_hz', 10.0)
-		self.declare_parameter('use_web_viewer', True)
-		self.declare_parameter('enable_text_output', True)
-		self.declare_parameter('text_output_every_n', 1)
+		# Allow undeclared parameters so that external clients (e.g. the
+		# rm_communication handler_node) can set BT control parameters
+		# (chase / patrol / standby / supply / constrained_defense /
+		# go_attack_outpost / rush_base / hit_energy_buff / occupy_point / repel / hp / ammo
+		# and any condition/action specific keys) without requiring this node
+		# to have declared every one of them in advance. This eliminates the
+		# rclpy "Invalid access to undeclared parameter(s)" warning when the
+		# external SyncParametersClient pushes state updates.
+		super().__init__(
+			'rm_bt_decision_node',
+			allow_undeclared_parameters=True,
+			automatically_declare_parameters_from_overrides=True,
+		)
+		# Re-declare core node parameters explicitly so we can read them with
+		# strong types regardless of the auto-declare behaviour above.
+		for name, default in (
+			('tree_config', ''),
+			('tick_hz', 10.0),
+			('use_web_viewer', True),
+			('enable_text_output', True),
+			('text_output_every_n', 1),
+		):
+			if not self.has_parameter(name):
+				self.declare_parameter(name, default)
+		# Pre-declare the BT control parameters that the communication node
+		# pushes every cycle so that initial set_parameters calls succeed and
+		# downstream conditions can read them immediately.
+		for bool_name in (
+			'chase',
+			'patrol',
+			'standby',
+			'supply',
+			'constrained_defense',
+			'constrained_defence',
+			'go_attack_outpost',
+			'rush_base',
+			'hit_energy_buff',
+			'occupy_point',
+			'repel',
+		):
+			if not self.has_parameter(bool_name):
+				self.declare_parameter(bool_name, False)
+		if not self.has_parameter('patrol_region'):
+			self.declare_parameter('patrol_region', 0)
+		for float_name, float_default in (('hp', 0.0), ('ammo', 0.0)):
+			if not self.has_parameter(float_name):
+				self.declare_parameter(float_name, float_default)
 		tree_config: str = self.get_parameter('tree_config').get_parameter_value().string_value
 		self.tick_hz: float = self.get_parameter('tick_hz').get_parameter_value().double_value
 		self.use_web_viewer: bool = self.get_parameter('use_web_viewer').get_parameter_value().bool_value

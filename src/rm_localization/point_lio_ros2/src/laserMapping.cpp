@@ -19,6 +19,31 @@
 
 namespace {
 constexpr double kDegreesPerRad = 57.29577951308232;
+
+std::string resolvePcdSavePath(const std::string& path) {
+    const std::string target = path.empty() ? std::string("PCD/scans.pcd") : path;
+    if (!target.empty() && target[0] == '/') {
+        return target;
+    }
+    return std::string(ROOT_DIR) + target;
+}
+
+std::string makeIndexedPcdSavePath(const std::string& path, int index) {
+    std::string full_path = resolvePcdSavePath(path);
+    const std::string suffix = "_" + std::to_string(index);
+    const std::string extension = ".pcd";
+    const auto ext_pos = full_path.rfind(extension);
+    const auto slash_pos = full_path.find_last_of("/\\");
+
+    if (ext_pos != std::string::npos &&
+        (slash_pos == std::string::npos || ext_pos > slash_pos))
+    {
+        full_path.insert(ext_pos, suffix);
+    } else {
+        full_path += suffix + extension;
+    }
+    return full_path;
+}
 }
 
 using namespace std;
@@ -259,11 +284,9 @@ void publish_frame_world(
                 && scan_wait_num >= pcd_save_interval)
             {
                 pcd_index++;
-                string all_points_dir(
-                    string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd")
-                );
+                string all_points_dir = makeIndexedPcdSavePath(pcd_save_file_path, pcd_index);
                 pcl::PCDWriter pcd_writer;
-                std::cout << "current scan saved to /PCD/" << all_points_dir << '\n';
+                std::cout << "current scan saved to " << all_points_dir << '\n';
                 pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
                 pcl_wait_save->clear();
                 scan_wait_num = 0;
@@ -1186,10 +1209,7 @@ int main(int argc, char** argv) {
 
     if (pcl_wait_save->size() > 0 && pcd_save_en) {
         // Determine full path: absolute as-is; relative to ROOT_DIR otherwise
-        std::string target =
-            pcd_save_file_path.empty() ? std::string("PCD/scans.pcd") : pcd_save_file_path;
-        std::string all_points_dir =
-            (target.size() > 0 && target[0] == '/') ? target : std::string(ROOT_DIR) + target;
+        std::string all_points_dir = resolvePcdSavePath(pcd_save_file_path);
         pcl::PCDWriter pcd_writer;
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
     }

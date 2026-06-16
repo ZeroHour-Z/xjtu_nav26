@@ -4,6 +4,7 @@ project(fast_lio_localization_ros2)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rclpy REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -30,7 +31,7 @@ ament_target_dependencies(transform_fusion rclcpp geometry_msgs nav_msgs tf2_ros
 target_link_libraries(transform_fusion Eigen3::Eigen)
 
 add_executable(global_localization src/global_localization.cpp)
-ament_target_dependencies(global_localization rclcpp geometry_msgs nav_msgs sensor_msgs std_msgs pcl_conversions)
+ament_target_dependencies(global_localization rclcpp geometry_msgs nav_msgs sensor_msgs std_msgs pcl_conversions tf2 tf2_ros)
 
 target_include_directories(global_localization PRIVATE ${PCL_INCLUDE_DIRS})
 

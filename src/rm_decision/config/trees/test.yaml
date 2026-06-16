@@ -62,7 +62,6 @@ tree:
                   param: "chase"
                   expected: true
                   latched_ok: false
-
           # 标记进入追击状态
           - type: SetBlackboard
             name: 设置追击标记
@@ -93,12 +92,30 @@ tree:
                   topic: "/chase_point"
                   min_target_delta: 0.25
                   min_resend_interval_s: 0.35
+                  publish_goal_topic: "/goal_pose"
+                  publish_chase_goal_topic: "/chase_goal_pose"
               # 等待 chase 参数变为 false（追击结束）
               - type: WaitForParamBool
                 name: 等待追击结束
                 params:
                   param: "chase"
                   expected: false
+              - type: Sequence
+                name: 等待追击规划判定
+                params:
+                  memory: true
+                children:
+                  - type: Wait
+                    name: 等待追击新规划
+                    params:
+                      duration_s: 0.4
+                  - type: TopicBoolCondition
+                    name: 等待追击路径穿过颠簸区
+                    params:
+                      topic: "/chase_path_through_fluctuate_region"
+                      expected: true
+                      latched_ok: false
+                      default_value: false
 
           # 清除追击标记
           - type: SetBlackboard

@@ -12,9 +12,9 @@
 
 unset COLCON_CURRENT_PREFIX
 source /opt/ros/humble/setup.zsh
-source ~/xjtu_nav25_new/install/setup.zsh       
+source ~/xjtu_nav26/install/setup.zsh       
 
-ENV_SETUP='source /opt/ros/humble/setup.zsh && source ~/xjtu_nav25_new/install/setup.zsh'
+ENV_SETUP='source /opt/ros/humble/setup.zsh && source ~/xjtu_nav26/install/setup.zsh'
 
 gnome-terminal --tab -- zsh -ic "$ENV_SETUP"
 sleep 1s

@@ -11,6 +11,7 @@ setup(
         (f'share/{package_name}', ['package.xml']),
         (f'share/{package_name}/config/trees', [
             'config/trees/nav.yaml',
+            'config/trees/RMUC.yaml',
             'config/trees/RMUL.yaml',
             'config/trees/test.yaml',
         ]),

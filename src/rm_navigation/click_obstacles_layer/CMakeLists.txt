@@ -6,6 +6,9 @@ find_package(rclcpp REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
@@ -15,6 +18,8 @@ include_directories(
 
 add_library(${PROJECT_NAME} SHARED
   src/click_obstacles_layer.cpp
+  src/directional_forbidden_layer.cpp
+  src/dynamic_scan_layer.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -27,6 +32,9 @@ ament_target_dependencies(${PROJECT_NAME}
   nav2_costmap_2d
   geometry_msgs
   std_msgs
+  sensor_msgs
+  tf2
+  tf2_geometry_msgs
   pluginlib
   visualization_msgs
 )
