@@ -412,14 +412,14 @@ private:
                 enter_blocked = escape_treat_unknown_as_lethal_;
             else
                 enter_blocked = static_cast<int>(current_cost) >= escape_enter_cost_threshold_;
-            RCLCPP_INFO_THROTTLE(
-                get_logger(),
-                *get_clock(),
-                2000,
-                "Current cost: %d, enter_blocked: %d",
-                current_cost,
-                enter_blocked
-            );
+            // RCLCPP_INFO_THROTTLE(
+            //     get_logger(),
+            //     *get_clock(),
+            //     2000,
+            //     "Current cost: %d, enter_blocked: %d",
+            //     current_cost,
+            //     enter_blocked
+            // );
         }
 
         if (!in_escape_mode_ && enter_blocked) {

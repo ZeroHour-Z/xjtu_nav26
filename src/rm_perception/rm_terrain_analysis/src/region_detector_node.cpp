@@ -646,14 +646,14 @@ private:
                 //     static_cast<unsigned int>(target_region_msg.data)
                 // );
             } else {
-                RCLCPP_WARN_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    1000,
-                    "Battle region classify (enemy): failed odom->map transform for odom(%.2f, %.2f)",
-                    latest_enemy_x_,
-                    latest_enemy_y_
-                );
+                // RCLCPP_WARN_THROTTLE(
+                //     this->get_logger(),
+                //     *this->get_clock(),
+                //     1000,
+                //     "Battle region classify (enemy): failed odom->map transform for odom(%.2f, %.2f)",
+                //     latest_enemy_x_,
+                //     latest_enemy_y_
+                // );
             }
         }
 

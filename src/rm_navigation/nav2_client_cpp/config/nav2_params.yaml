@@ -281,7 +281,7 @@ planner_server:
       # plugin: "nav2_navfn_planner/NavfnPlanner"  # Dijkstra/A*
       plugin: "nav2_smac_planner/SmacPlanner2D"  # State Lattice 混合A*
       # plugin: "nav2_theta_star_planner/ThetaStarPlanner"  # Theta*
-      tolerance: 1.0  # 目标容差(m)
+      tolerance: 0.05  # 目标容差(m)
       allow_unknown: true  # 允许规划穿过未知区域
       downsample_costmap: false  # 是否下采样代价地图（大地图时可启用）
       downsampling_factor: 2  # 下采样倍率（例如5cm→10cm）

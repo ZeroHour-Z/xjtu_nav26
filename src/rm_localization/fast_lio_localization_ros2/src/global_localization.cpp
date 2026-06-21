@@ -89,12 +89,12 @@ public:
         // Subscriptions
         sub_cloud_registered_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "/cloud_registered",
-            1,
+            qos_reliable,
             std::bind(&GlobalLocalizationNode::cbSaveCurScan, this, std::placeholders::_1)
         );
         sub_aft_mapped_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/odom",
-            1,
+            qos_reliable,
             std::bind(&GlobalLocalizationNode::cbSaveCurOdom, this, std::placeholders::_1)
         );
         sub_map3d_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -374,19 +374,23 @@ private:
 
     bool globalLocalization(Eigen::Matrix4d& pose_estimation) {
         auto gm = global_map_;
-        if (!gm || !cur_scan_ || !cur_odom_)
+        if (!gm || !refreshCurrentScan())
+            return false;
+        auto scan = std::atomic_load(&cur_scan_);
+        auto odom = std::atomic_load(&cur_odom_);
+        if (!scan || !odom)
             return false;
 
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "Global localization by scan-to-map matching ..."
-        );
-        auto submap = cropGlobalMapInFOV(gm, pose_estimation, *cur_odom_);
+        // RCLCPP_INFO_THROTTLE(
+        //     this->get_logger(),
+        //     *this->get_clock(),
+        //     1000,
+        //     "Global localization by scan-to-map matching ..."
+        // );
+        auto submap = cropGlobalMapInFOV(gm, pose_estimation, *odom);
 
-        auto [T1, mse1] = registrationAtScale(cur_scan_, submap, pose_estimation, 5.0);
-        auto [T2, mse2] = registrationAtScale(cur_scan_, submap, T1, 1.0);
+        auto [T1, mse1] = registrationAtScale(scan, submap, pose_estimation, 5.0);
+        auto [T2, mse2] = registrationAtScale(scan, submap, T1, 1.0);
         double mse = mse2;
 
         bool map2odom_completed = this->get_parameter("map2odom_completed").as_bool();
@@ -408,7 +412,7 @@ private:
         double mse_th = std::max(1e-6, this->get_parameter("localization_th").as_double());
         if (mse < mse_th) {
             pose_estimation = T2;
-            publishMapToOdom(T2, cur_odom_->header.stamp, "relocalization");
+            publishMapToOdom(T2, odom->header.stamp, "relocalization");
             RCLCPP_INFO(this->get_logger(), "Relocalization mse: %.6f (mse_th=%.6f)", mse, mse_th);
             return true;
         } else {
@@ -460,7 +464,12 @@ private:
 
     // Global grid search: search entire map for best matching position
     bool tryGlobalGridSearch() {
-        if (!cur_scan_ || !cur_odom_ || !global_map_)
+        if (!refreshCurrentScan())
+            return false;
+        auto scan = std::atomic_load(&cur_scan_);
+        auto odom = std::atomic_load(&cur_odom_);
+        auto gm = global_map_;
+        if (!scan || !odom || !gm)
             return false;
 
         double grid_step = this->get_parameter("global_search_step").as_double();
@@ -523,11 +532,11 @@ private:
                     T_init(1, 0) = std::sin(yaw);
                     T_init(1, 1) = std::cos(yaw);
 
-                    auto submap = cropGlobalMapInFOV(global_map_, T_init, *cur_odom_);
+                    auto submap = cropGlobalMapInFOV(gm, T_init, *odom);
                     if (submap->size() < 100)
                         continue;
 
-                    auto [T1, mse1] = registrationAtScale(cur_scan_, submap, T_init, 5.0);
+                    auto [T1, mse1] = registrationAtScale(scan, submap, T_init, 5.0);
 
                     tested++;
                     if (mse1 < best_mse) {
@@ -574,12 +583,12 @@ private:
                         T_init(1, 0) = std::sin(yaw);
                         T_init(1, 1) = std::cos(yaw);
 
-                        auto submap = cropGlobalMapInFOV(global_map_, T_init, *cur_odom_);
+                        auto submap = cropGlobalMapInFOV(gm, T_init, *odom);
                         if (submap->size() < 100)
                             continue;
 
-                        auto [T1, mse1] = registrationAtScale(cur_scan_, submap, T_init, 3.0);
-                        auto [T2, mse2] = registrationAtScale(cur_scan_, submap, T1, 1.0);
+                        auto [T1, mse1] = registrationAtScale(scan, submap, T_init, 3.0);
+                        auto [T2, mse2] = registrationAtScale(scan, submap, T1, 1.0);
 
                         if (mse2 < best_mse) {
                             best_mse = mse2;
@@ -600,7 +609,7 @@ private:
         if (best_mse < mse_th) {
             T_map_to_odom_ = best_T;
             RCLCPP_INFO(this->get_logger(), "GLOBAL INIT SUCCESS!");
-            publishMapToOdom(best_T, cur_odom_->header.stamp, "global search");
+            publishMapToOdom(best_T, odom->header.stamp, "global search");
             return true;
         }
 
@@ -615,7 +624,12 @@ private:
 
     // Multi-hypothesis initialization: try different yaw angles at current position
     bool tryMultiHypothesisInit() {
-        if (!cur_scan_ || !cur_odom_ || !global_map_)
+        if (!refreshCurrentScan())
+            return false;
+        auto scan = std::atomic_load(&cur_scan_);
+        auto odom = std::atomic_load(&cur_odom_);
+        auto gm = global_map_;
+        if (!scan || !odom || !gm)
             return false;
 
         double best_mse = std::numeric_limits<double>::max();
@@ -645,12 +659,12 @@ private:
             T_init(1, 0) = std::sin(yaw);
             T_init(1, 1) = std::cos(yaw);
 
-            auto submap = cropGlobalMapInFOV(global_map_, T_init, *cur_odom_);
+            auto submap = cropGlobalMapInFOV(gm, T_init, *odom);
             if (submap->empty())
                 continue;
 
-            auto [T1, mse1] = registrationAtScale(cur_scan_, submap, T_init, 5.0);
-            auto [T2, mse2] = registrationAtScale(cur_scan_, submap, T1, 1.0);
+            auto [T1, mse1] = registrationAtScale(scan, submap, T_init, 5.0);
+            auto [T2, mse2] = registrationAtScale(scan, submap, T1, 1.0);
 
             RCLCPP_INFO(this->get_logger(), "  yaw=%.0f deg, mse=%.6f", yaw * 180.0 / M_PI, mse2);
 
@@ -668,7 +682,7 @@ private:
                 "Multi-hypothesis init SUCCESS! best_mse=%.6f",
                 best_mse
             );
-            publishMapToOdom(best_T, cur_odom_->header.stamp, "multi-hypothesis init");
+            publishMapToOdom(best_T, odom->header.stamp, "multi-hypothesis init");
             return true;
         }
 
@@ -688,10 +702,14 @@ private:
         }
 
         // Wait for first scan and odom
-        while (alive_.load() && rclcpp::ok() && (!cur_scan_ || !cur_odom_)) {
-            if (!cur_scan_)
+        while (alive_.load() && rclcpp::ok()) {
+            auto scan = std::atomic_load(&latest_scan_msg_);
+            auto odom = std::atomic_load(&cur_odom_);
+            if (scan && odom)
+                break;
+            if (!scan)
                 RCLCPP_WARN(this->get_logger(), "Waiting for first scan ...");
-            if (!cur_odom_)
+            if (!odom)
                 RCLCPP_WARN(this->get_logger(), "Waiting for odom ...");
             rclcpp::sleep_for(std::chrono::seconds(1));
         }
@@ -704,6 +722,7 @@ private:
 
         if (use_initial_pose) {
             T_map_to_odom_ = getInitialPoseFromParams();
+            auto odom = std::atomic_load(&cur_odom_);
             RCLCPP_INFO(
                 this->get_logger(),
                 "Using initial map3d->odom from parameters: x=%.2f, y=%.2f, yaw=%.2f",
@@ -711,7 +730,8 @@ private:
                 this->get_parameter("initial_y").as_double(),
                 this->get_parameter("initial_yaw").as_double()
             );
-            publishMapToOdom(T_map_to_odom_, cur_odom_->header.stamp, "initial parameters");
+            if (odom)
+                publishMapToOdom(T_map_to_odom_, odom->header.stamp, "initial parameters");
         }
 
         publishInitialPose();
@@ -794,20 +814,33 @@ private:
 
     // Callbacks
     void cbSaveCurOdom(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        cur_odom_ = msg;
+        std::atomic_store(&cur_odom_, msg);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "Received odom: pos=(%.2f,%.2f)", msg->pose.pose.position.x, msg->pose.pose.position.y);
     }
 
     void cbSaveCurScan(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+        std::atomic_store(&latest_scan_msg_, msg);
+    }
+
+    bool refreshCurrentScan() {
+        auto msg = std::atomic_load(&latest_scan_msg_);
+        if (!msg)
+            return false;
+        if (msg == processed_scan_msg_)
+            return static_cast<bool>(std::atomic_load(&cur_scan_));
+
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::fromROSMsg(*msg, *cloud);
-        cur_scan_ = cloud;
+        std::atomic_store(&cur_scan_, cloud);
+        processed_scan_msg_ = msg;
 
-        // republish with odom frame
         sensor_msgs::msg::PointCloud2 out;
         out = *msg; // keep data as-is
         out.header.frame_id = this->get_parameter("odom_frame").as_string();
         out.header.stamp = this->now();
         pub_pc_in_map_->publish(out);
+        return true;
     }
 
     // Callback for /initialpose from RViz "2D Pose Estimate"
@@ -826,7 +859,8 @@ private:
         T_map_to_base(1, 3) = p.y;
         T_map_to_base(2, 3) = p.z;
 
-        if (!cur_odom_) {
+        auto odom = std::atomic_load(&cur_odom_);
+        if (!odom) {
             // No odometry yet: cannot relate base_link to odom, store click as map3d->odom.
             {
                 std::lock_guard<std::mutex> lk(pose_mutex_);
@@ -845,10 +879,10 @@ private:
         // The /odom message is odom(=camera_init) -> <child> (point_lio child is
         // "body", NOT base_link). Compose with the static <child> -> base_link
         // transform so that the clicked pose actually places base_link.
-        Eigen::Matrix4d T_odom_to_child = poseToMat(*cur_odom_);
+        Eigen::Matrix4d T_odom_to_child = poseToMat(*odom);
         Eigen::Matrix4d T_odom_to_base = T_odom_to_child; // fallback: assume child == base_link
         const std::string child_frame =
-            cur_odom_->child_frame_id.empty() ? std::string("body") : cur_odom_->child_frame_id;
+            odom->child_frame_id.empty() ? std::string("body") : odom->child_frame_id;
         const std::string base_frame = this->get_parameter("base_link_frame").as_string();
         if (child_frame != base_frame) {
             try {
@@ -904,6 +938,8 @@ private:
     std::atomic<bool> alive_ { true };
     std::thread worker_;
     pcl::PointCloud<pcl::PointNormal>::Ptr global_map_;
+    sensor_msgs::msg::PointCloud2::SharedPtr latest_scan_msg_;
+    sensor_msgs::msg::PointCloud2::SharedPtr processed_scan_msg_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr cur_scan_;
     nav_msgs::msg::Odometry::SharedPtr cur_odom_;
 

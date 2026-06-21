@@ -19,19 +19,19 @@ def generate_launch_description():
 
     backend_arg = DeclareLaunchArgument(
         'backend',
-        default_value='faster_lio',
-        description='定位后端: fast_lio, fast_lio, point_lio'
+        default_value='point_lio',
+        description='定位后端: fast_lio, faster_lio, point_lio'
     )
 
     map_pcd_arg = DeclareLaunchArgument(
         'map_pcd',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.pcd"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "test", "map.pcd"]),
         description='3D 点云地图路径 (用于定位)'
     )
 
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.yaml"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "test", "map.yaml"]),
         description='2D 栅格地图路径 (用于导航)'
     )
 

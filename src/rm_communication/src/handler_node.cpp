@@ -325,11 +325,36 @@ private:
     }
 
     void onGoalPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        double x = msg->pose.position.x;
-        double y = msg->pose.position.y;
-        this->set_parameter(rclcpp::Parameter("target_x", x));
-        this->set_parameter(rclcpp::Parameter("target_y", y));
-        RCLCPP_INFO(this->get_logger(), "Goal pose received: x=%.3f, y=%.3f", x, y);
+        geometry_msgs::msg::PoseStamped goal_pose = *msg;
+        if (goal_pose.header.frame_id.empty()) {
+            goal_pose.header.frame_id = map_frame_;
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Goal pose has empty frame_id, assuming %s",
+                map_frame_.c_str()
+            );
+        }
+
+        geometry_msgs::msg::PoseStamped goal_in_map;
+        if (!transformPoseToMap(goal_pose, goal_in_map, "goal_pose")) {
+            return;
+        }
+
+        const double x = goal_in_map.pose.position.x;
+        const double y = goal_in_map.pose.position.y;
+        setTargetMap(x, y);
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Goal pose received: %s(%.3f, %.3f) -> %s(%.3f, %.3f)",
+            goal_pose.header.frame_id.c_str(),
+            msg->pose.position.x,
+            msg->pose.position.y,
+            map_frame_.c_str(),
+            x,
+            y
+        );
     }
 
     void onRxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
@@ -659,9 +684,8 @@ private:
 
         chase_point_pub_->publish(chase_pose);
 
-        // 同步更新 target_x/target_y 参数，使 TX 包中的目标位置也更新
-        this->set_parameter(rclcpp::Parameter("target_x", target_map_x));
-        this->set_parameter(rclcpp::Parameter("target_y", target_map_y));
+        // 同步更新 map 目标缓存；TX 发包前会转换为 odom 坐标发给电控。
+        setTargetMap(target_map_x, target_map_y);
 
         // RCLCPP_INFO_THROTTLE(
         //     this->get_logger(),
@@ -693,11 +717,10 @@ private:
             nav_info_.yaw_desired = region_yaw_desired_;
         }
 
-        double target_x = 0.0, target_y = 0.0;
-        (void)this->get_parameter("target_x", target_x);
-        (void)this->get_parameter("target_y", target_y);
-        nav_info_.x_target = static_cast<float>(target_x);
-        nav_info_.y_target = static_cast<float>(target_y);
+        double target_map_x = 0.0, target_map_y = 0.0;
+        (void)this->get_parameter("target_x", target_map_x);
+        (void)this->get_parameter("target_y", target_map_y);
+        updateTxTargetInOdom(target_map_x, target_map_y);
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
@@ -732,6 +755,75 @@ private:
         while (angle < -M_PI)
             angle += 2.0 * M_PI;
         return angle;
+    }
+
+    void setTargetMap(double x, double y) {
+        this->set_parameter(rclcpp::Parameter("target_x", x));
+        this->set_parameter(rclcpp::Parameter("target_y", y));
+    }
+
+    bool transformPoseToMap(
+        const geometry_msgs::msg::PoseStamped& pose,
+        geometry_msgs::msg::PoseStamped& pose_in_map,
+        const char* source_name
+    ) {
+        if (pose.header.frame_id == map_frame_) {
+            pose_in_map = pose;
+            return true;
+        }
+
+        try {
+            pose_in_map = tf_buffer_.transform(pose, map_frame_, tf2::durationFromSec(0.1));
+            return true;
+        } catch (const tf2::TransformException& ex) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Failed to transform %s from %s to %s: %s",
+                source_name,
+                pose.header.frame_id.c_str(),
+                map_frame_.c_str(),
+                ex.what()
+            );
+            return false;
+        }
+    }
+
+    bool updateTxTargetInOdom(double target_map_x, double target_map_y) {
+        if (map_frame_ == "odom") {
+            nav_info_.x_target = static_cast<float>(target_map_x);
+            nav_info_.y_target = static_cast<float>(target_map_y);
+            return true;
+        }
+
+        geometry_msgs::msg::PoseStamped target_in_map;
+        target_in_map.header.stamp = this->now();
+        target_in_map.header.frame_id = map_frame_;
+        target_in_map.pose.position.x = target_map_x;
+        target_in_map.pose.position.y = target_map_y;
+        target_in_map.pose.position.z = 0.0;
+        target_in_map.pose.orientation.w = 1.0;
+
+        try {
+            geometry_msgs::msg::PoseStamped target_in_odom;
+            const auto map_to_odom_tf =
+                tf_buffer_.lookupTransform("odom", map_frame_, tf2::TimePointZero);
+            tf2::doTransform(target_in_map, target_in_odom, map_to_odom_tf);
+            nav_info_.x_target = static_cast<float>(target_in_odom.pose.position.x);
+            nav_info_.y_target = static_cast<float>(target_in_odom.pose.position.y);
+            return true;
+        } catch (const tf2::TransformException& ex) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Failed to transform TX target from %s to odom, keeping previous odom target: %s",
+                map_frame_.c_str(),
+                ex.what()
+            );
+            return false;
+        }
     }
 
     // 发布器

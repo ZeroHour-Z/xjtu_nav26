@@ -35,16 +35,16 @@ typedef struct { // 电控发送的命令数据
 #pragma pack()
 
 #pragma pack(1)
-typedef struct { // 都使用朴素机器人坐标系,前x,左y,上z
+typedef struct { // 发给电控：速度用机器人坐标系，位置用 odom，yaw 用 map
     uint8_t frame_header; // 8位帧头 0x72
-    float x_speed; // x 方向速度
-    float y_speed; // y 方向速度
-    float x_current; // 当前 x 坐标
-    float y_current; // 当前 y 坐标
-    float x_target; // 当前 x 坐标
-    float y_target; // 当前 y 坐标
-    float yaw_current; // 当前雷达偏航角
-    float yaw_desired; // 期望雷达偏航角
+    float x_speed; // base_link x 方向速度，前为正
+    float y_speed; // base_link y 方向速度，左为正
+    float x_current; // odom 当前 x 坐标
+    float y_current; // odom 当前 y 坐标
+    float x_target; // odom 目标 x 坐标
+    float y_target; // odom 目标 y 坐标
+    float yaw_current; // map 下当前 body 偏航角
+    float yaw_desired; // map 下期望 body 偏航角
     uint8_t sentry_region; // 8位哨兵区域
     float time_test; // 32位测试时间，单位秒//没用
     uint8_t nav_state; // 状态
