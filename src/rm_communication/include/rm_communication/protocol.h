@@ -43,8 +43,8 @@ typedef struct { // 发给电控：速度用机器人坐标系，位置用 odom�
     float y_current; // odom 当前 y 坐标
     float x_target; // odom 目标 x 坐标
     float y_target; // odom 目标 y 坐标
-    float yaw_current; // map 下当前 body 偏航角
-    float yaw_desired; // map 下期望 body 偏航角
+    float yaw_current; // map 下当前 base_link 偏航角
+    float yaw_desired; // map 下期望 base_link 偏航角
     uint8_t sentry_region; // 8位哨兵区域
     float time_test; // 32位测试时间，单位秒//没用
     uint8_t nav_state; // 状态

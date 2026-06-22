@@ -157,7 +157,6 @@ public:
 private:
     // map 坐标系下的航向角和角速度（map→base_link，用于速度坐标系变换）
     double yaw_in_map_ { 0.0 };
-    double yaw_in_map_body_ { 0.0 };  // map→body，用于发给电控的 yaw_current
     double prev_yaw_in_map_ { 0.0 };
     double estimated_wz_ { 0.0 };
     rclcpp::Time prev_tf_time_;
@@ -217,23 +216,9 @@ private:
             prev_tf_time_ = now;
             has_prev_tf_ = true;
             yaw_in_map_ = yaw;
+            nav_info_.yaw_current = static_cast<float>(yaw_in_map_);
         } catch (const tf2::TransformException& ex) {
             // TF not ready yet
-        }
-
-        // map→body：发给电控的 yaw_current（map 系本质是建图时的冻结 odom）
-        try {
-            auto tf_body = tf_buffer_.lookupTransform("map", "body", tf2::TimePointZero);
-            tf2::Quaternion qb;
-            qb.setX(tf_body.transform.rotation.x);
-            qb.setY(tf_body.transform.rotation.y);
-            qb.setZ(tf_body.transform.rotation.z);
-            qb.setW(tf_body.transform.rotation.w);
-            double rb, pb, yb;
-            tf2::Matrix3x3(qb).getRPY(rb, pb, yb);
-            yaw_in_map_body_ = yb;
-        } catch (const tf2::TransformException&) {
-            // map→body not available yet
         }
 
         // 从 odom→body TF 获取当前位置（odom帧）
@@ -244,7 +229,6 @@ private:
         } catch (const tf2::TransformException&) {
             // odom→body not available yet
         }
-        nav_info_.yaw_current = static_cast<float>(yaw_in_map_body_);
     }
 
     void onCmdVel(const geometry_msgs::msg::Twist::SharedPtr msg) {

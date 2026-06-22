@@ -71,13 +71,13 @@ controller_server:
     general_goal_checker:
       stateful: True  # 保持状态
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.1  # XY平面位置容差(m) - 放宽以适应陀螺
+      xy_goal_tolerance: 0.01  # XY平面位置容差(m) - 放宽以适应陀螺
       yaw_goal_tolerance: 0.8  # 航向角容差(rad) - 放宽角度要求
 
     # === Regulated Pure Pursuit 路径跟踪控制器 ===
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.5  # 期望线速度(m/s) - 过弯时降低切角风险
+      desired_linear_vel: 0.4  # 期望线速度(m/s) - 过弯时降低切角风险
       lookahead_dist: 0.6  # 前瞻距离(m) - 减小以避免急弯内切
       min_lookahead_dist: 0.3  # 最小前瞻距离(m)
       max_lookahead_dist: 0.9  # 最大前瞻距离(m)
@@ -185,8 +185,8 @@ global_costmap:
       global_frame: map  # 全局坐标系
       robot_base_frame: base_link  # 机器人底盘坐标系
       use_sim_time: False
-      robot_radius: 0.25  # 机器人半径(m) = 39cm
-      resolution: 0.05  # 地图分辨率(m/pixel)
+      robot_radius: 0.3  # 机器人半径(m) = 39cm
+      resolution: 0.01  # 地图分辨率(m/pixel)
       track_unknown_space: true  # 跟踪未知空间
       plugins: ["static_layer", "voxel2d_layer", "click_obstacles_layer", "inflation_layer"]  # 使用的层插件
       # === 2D体素障碍物层（使用VoxelLayer减少抖动）===
@@ -281,7 +281,7 @@ planner_server:
       # plugin: "nav2_navfn_planner/NavfnPlanner"  # Dijkstra/A*
       plugin: "nav2_smac_planner/SmacPlanner2D"  # State Lattice 混合A*
       # plugin: "nav2_theta_star_planner/ThetaStarPlanner"  # Theta*
-      tolerance: 0.05  # 目标容差(m)
+      tolerance: 0.01  # 目标容差(m)
       allow_unknown: true  # 允许规划穿过未知区域
       downsample_costmap: false  # 是否下采样代价地图（大地图时可启用）
       downsampling_factor: 2  # 下采样倍率（例如5cm→10cm）
@@ -290,7 +290,7 @@ planner_server:
       # --- 路径平滑器 ---
       smoother:
         max_iterations: 200  # 最大迭代次数
-        w_smooth: 0.8  # 平滑权重 ↑ 提高使路径更直
+        w_smooth: 0.7  # 平滑权重 ↑ 提高使路径更直
         w_data: 0.2  # 数据权重 ↓ 降低以减少对原路径的依赖
         tolerance: 1.0e-10  # 收敛容差
         do_refinement: true  # 启用细化
