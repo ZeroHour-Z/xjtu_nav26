@@ -21,6 +21,10 @@ global_velocity_controller:
     max_vx: 1.0
     max_vy: 1.0
     max_wz: 1.0  # 提高到5.0，不限制陀螺角速度
+    fluctuate_decel_distance: 1.5       # 路径即将进入fluctuate时开始预减速的距离
+    fluctuate_prepare_distance: 1.1      # 与region_detector标志提前量保持一致
+    fluctuate_prepare_max_speed: 0.5    # 预减速段最大速度
+    fluctuate_min_approach_speed: 0.35   # 标志触发前压到低速，避免电控置0时过冲
 
     anti_windup_integral_limit_xy: 0.5
     anti_windup_integral_limit_yaw: 0.5

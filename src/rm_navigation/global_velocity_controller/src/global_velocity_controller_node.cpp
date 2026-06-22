@@ -3,6 +3,8 @@
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/float32.hpp"
+#include "std_msgs/msg/u_int8.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -42,6 +44,12 @@ public:
         declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
         declare_parameter<std::string>("path_topic", "/plan");
         declare_parameter<std::string>("global_costmap_topic", "/global_costmap/costmap");
+        declare_parameter<std::string>(
+            "fluctuate_distance_topic",
+            "/distance_to_fluctuate_region"
+        );
+        declare_parameter<std::string>("region_topic", "/region_type");
+        declare_parameter<int>("fluctuate_region_value", 5);
 
         // 位控PID增益
         declare_parameter<double>("kp_xy", 1.5);
@@ -55,6 +63,10 @@ public:
         declare_parameter<double>("max_wz", 1.2);
         declare_parameter<double>("cmd_accel_limit_linear", 2.0);
         declare_parameter<double>("cmd_accel_limit_angular", 4.0);
+        declare_parameter<double>("fluctuate_decel_distance", 2.0);
+        declare_parameter<double>("fluctuate_prepare_distance", 1.1);
+        declare_parameter<double>("fluctuate_prepare_max_speed", 0.35);
+        declare_parameter<double>("fluctuate_min_approach_speed", 0.22);
 
         // 路径跟踪参数
         declare_parameter<double>("goal_tolerance", 0.1);
@@ -105,6 +117,14 @@ public:
         max_wz_ = get_parameter("max_wz").as_double();
         cmd_accel_limit_linear_ = get_parameter("cmd_accel_limit_linear").as_double();
         cmd_accel_limit_angular_ = get_parameter("cmd_accel_limit_angular").as_double();
+        fluctuate_decel_distance_ = get_parameter("fluctuate_decel_distance").as_double();
+        fluctuate_prepare_distance_ = get_parameter("fluctuate_prepare_distance").as_double();
+        fluctuate_prepare_max_speed_ =
+            get_parameter("fluctuate_prepare_max_speed").as_double();
+        fluctuate_min_approach_speed_ =
+            get_parameter("fluctuate_min_approach_speed").as_double();
+        fluctuate_region_value_ =
+            static_cast<uint8_t>(get_parameter("fluctuate_region_value").as_int());
 
         // --- 新增: 获取动态前瞻距离参数 ---
         enable_dynamic_lookahead_ = get_parameter("enable_dynamic_lookahead").as_bool();
@@ -153,6 +173,16 @@ public:
             1,
             std::bind(&SimplifiedControllerNode::onCostmap, this, _1)
         );
+        fluctuate_distance_sub_ = create_subscription<std_msgs::msg::Float32>(
+            get_parameter("fluctuate_distance_topic").as_string(),
+            10,
+            std::bind(&SimplifiedControllerNode::onFluctuateDistance, this, _1)
+        );
+        region_sub_ = create_subscription<std_msgs::msg::UInt8>(
+            get_parameter("region_topic").as_string(),
+            10,
+            std::bind(&SimplifiedControllerNode::onRegionType, this, _1)
+        );
 
         // Timers: separate escape and normal control loops
         control_timer_ = create_wall_timer(
@@ -184,6 +214,14 @@ private:
     void onCostmap(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         last_costmap_ = *msg;
         has_costmap_ = true;
+    }
+
+    void onFluctuateDistance(const std_msgs::msg::Float32::SharedPtr msg) {
+        distance_to_fluctuate_region_ = msg->data;
+    }
+
+    void onRegionType(const std_msgs::msg::UInt8::SharedPtr msg) {
+        current_region_ = msg->data;
     }
 
     void onControlTimer() {
@@ -354,6 +392,7 @@ private:
         // 8. 应用速度和加速度限制
         double vx_out = std::clamp(vx_base_raw, -max_vx_, max_vx_);
         double vy_out = std::clamp(vy_base_raw, -max_vy_, max_vy_);
+        applyFluctuateApproachSpeedLimit(vx_out, vy_out);
 
         // 加速度限制
         const double max_dv = cmd_accel_limit_linear_ * dt;
@@ -378,6 +417,52 @@ private:
         if (simulate_) {
             simulator_.integrateBodyCommand({ cmd.linear.x, cmd.linear.y, SIM_OMEGA }, dt);
             publishSimulatedTransform(now);
+        }
+    }
+
+    void applyFluctuateApproachSpeedLimit(double& vx, double& vy) {
+        const double distance = distance_to_fluctuate_region_;
+        if (current_region_ == fluctuate_region_value_ ||
+            distance < 0.0 ||
+            distance <= fluctuate_release_distance_ ||
+            !std::isfinite(distance) ||
+            fluctuate_decel_distance_ <= 0.0)
+        {
+            return;
+        }
+
+        const double speed = std::hypot(vx, vy);
+        if (speed < 1e-6) {
+            return;
+        }
+
+        double speed_limit = speed;
+        if (distance <= fluctuate_prepare_distance_) {
+            speed_limit = fluctuate_min_approach_speed_;
+        } else if (distance < fluctuate_decel_distance_) {
+            const double ratio =
+                (distance - fluctuate_prepare_distance_) /
+                std::max(1e-6, fluctuate_decel_distance_ - fluctuate_prepare_distance_);
+            speed_limit =
+                fluctuate_min_approach_speed_ +
+                std::clamp(ratio, 0.0, 1.0) *
+                    (fluctuate_prepare_max_speed_ - fluctuate_min_approach_speed_);
+        }
+
+        speed_limit = std::clamp(speed_limit, 0.0, speed);
+        if (speed_limit < speed) {
+            const double scale = speed_limit / speed;
+            vx *= scale;
+            vy *= scale;
+            RCLCPP_INFO_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                500,
+                "Slowing before fluctuate: dist=%.2f speed %.2f -> %.2f",
+                distance,
+                speed,
+                speed_limit
+            );
         }
     }
 
@@ -869,6 +954,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr fluctuate_distance_sub_;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr region_sub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr escape_timer_;
     tf2_ros::Buffer tf_buffer_;
@@ -886,6 +973,14 @@ private:
     double kp_xy_, ki_xy_, kd_xy_, kp_yaw_;
     double max_vx_, max_vy_, max_wz_;
     double cmd_accel_limit_linear_, cmd_accel_limit_angular_;
+    double fluctuate_decel_distance_ { 2.0 };
+    double fluctuate_prepare_distance_ { 1.1 };
+    double fluctuate_prepare_max_speed_ { 0.35 };
+    double fluctuate_min_approach_speed_ { 0.22 };
+    double fluctuate_release_distance_ { 0.05 };
+    double distance_to_fluctuate_region_ { -1.0 };
+    uint8_t fluctuate_region_value_ { 5 };
+    uint8_t current_region_ { 1 };
     double prediction_time_factor_;
 
     // 新增: 动态前瞻距离参数

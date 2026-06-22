@@ -185,8 +185,8 @@ global_costmap:
       global_frame: map  # 全局坐标系
       robot_base_frame: base_link  # 机器人底盘坐标系
       use_sim_time: False
-      robot_radius: 0.3  # 机器人半径(m) = 39cm
-      resolution: 0.01  # 地图分辨率(m/pixel)
+      robot_radius: 0.3  # 机器人半径(m)
+      resolution: 0.03  # 地图分辨率(m/pixel)
       track_unknown_space: true  # 跟踪未知空间
       plugins: ["static_layer", "voxel2d_layer", "click_obstacles_layer", "inflation_layer"]  # 使用的层插件
       # === 2D体素障碍物层（使用VoxelLayer减少抖动）===

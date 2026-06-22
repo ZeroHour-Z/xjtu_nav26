@@ -101,6 +101,8 @@ public:
         // 发布器
         region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/region_type", 10);
         yaw_pub_ = this->create_publisher<std_msgs::msg::Float32>("/region_yaw_desired", 10);
+        fluctuate_distance_pub_ =
+            this->create_publisher<std_msgs::msg::Float32>("/distance_to_fluctuate_region", 10);
         path_through_fluctuate_pub_ =
             this->create_publisher<std_msgs::msg::Bool>("/path_through_fluctuate_region", 10);
         chase_path_through_fluctuate_pub_ =
@@ -562,9 +564,23 @@ private:
         RegionType current_region = REGION_FLAT;
         double yaw_desired = 0.0;
         bool in_special_region = false;
+        double nearest_path_fluctuate_distance =
+            std::numeric_limits<double>::infinity();
 
         for (size_t i = 0; i < regions_.size(); ++i) {
             const auto& region = regions_[i];
+            const bool path_goes_through_region = path_regions_.count(i) > 0;
+
+            if (path_goes_through_region && region.type == REGION_FLUCTUATE) {
+                if (isPointInPolygon(robot_x, robot_y, region.polygon)) {
+                    nearest_path_fluctuate_distance = 0.0;
+                } else {
+                    nearest_path_fluctuate_distance = std::min(
+                        nearest_path_fluctuate_distance,
+                        distanceToPolygon(robot_x, robot_y, region.polygon)
+                    );
+                }
+            }
 
             // 检查是否在区域内
             if (isPointInPolygon(robot_x, robot_y, region.polygon)) {
@@ -588,7 +604,7 @@ private:
             }
 
             // 检查是否即将进入区域（路径经过且距离近）
-            if (path_regions_.count(i) > 0) {
+            if (path_goes_through_region) {
                 double dist = distanceToPolygon(robot_x, robot_y, region.polygon);
                 if (dist < lookahead_dist) {
                     current_region = region.type;
@@ -615,6 +631,12 @@ private:
         std_msgs::msg::UInt8 region_msg;
         region_msg.data = static_cast<uint8_t>(current_region);
         region_pub_->publish(region_msg);
+
+        std_msgs::msg::Float32 fluctuate_distance_msg;
+        fluctuate_distance_msg.data = std::isfinite(nearest_path_fluctuate_distance)
+            ? static_cast<float>(nearest_path_fluctuate_distance)
+            : -1.0f;
+        fluctuate_distance_pub_->publish(fluctuate_distance_msg);
 
         // 发布期望航向角
         std_msgs::msg::Float32 yaw_msg;
@@ -931,6 +953,7 @@ private:
 
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr region_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr yaw_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fluctuate_distance_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr path_through_fluctuate_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr chase_path_through_fluctuate_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr target_region_pub_;
