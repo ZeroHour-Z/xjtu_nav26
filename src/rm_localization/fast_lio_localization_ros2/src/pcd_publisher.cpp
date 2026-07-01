@@ -8,6 +8,7 @@
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 class PcdPublisherNode: public rclcpp::Node {
@@ -18,6 +19,11 @@ public:
         this->declare_parameter<double>("rate", 5.0);
         this->declare_parameter<bool>("filter_invalid_points", true);
         this->declare_parameter<double>("max_abs_coord", 100000.0);
+        // Voxel downsampling of the published cloud. RViz lags when rendering the
+        // full dense map, so we publish a downsampled copy. global_localization
+        // re-voxelizes /map3d to map_voxel_size (0.2 m by default) before ICP, so a
+        // leaf <= that does not degrade localization. Set <= 0 to disable.
+        this->declare_parameter<double>("voxel_leaf_size", 0.1);
 
         rclcpp::QoS qos(1);
         qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
@@ -32,10 +38,10 @@ public:
             if (pcl::io::loadPCDFile<pcl::PointXYZ>(path, *cloud) == -1) {
                 RCLCPP_ERROR(this->get_logger(), "Failed to load PCD: %s", path.c_str());
             } else {
-                cloud_ = sanitizeCloud(cloud);
+                cloud_ = downsampleCloud(sanitizeCloud(cloud));
                 RCLCPP_INFO(
                     this->get_logger(),
-                    "Loaded PCD: %s with %zu valid points",
+                    "Loaded PCD: %s with %zu published points",
                     path.c_str(),
                     cloud_->points.size()
                 );
@@ -97,6 +103,35 @@ private:
                 output->points.size()
             );
         }
+
+        return output;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr
+    downsampleCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& input) {
+        double leaf = this->get_parameter("voxel_leaf_size").as_double();
+        if (leaf <= 0.0 || input->points.empty()) {
+            return input;
+        }
+
+        auto output = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        pcl::VoxelGrid<pcl::PointXYZ> vg;
+        vg.setInputCloud(input);
+        vg.setLeafSize(
+            static_cast<float>(leaf),
+            static_cast<float>(leaf),
+            static_cast<float>(leaf)
+        );
+        vg.filter(*output);
+        output->is_dense = true;
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Voxel-downsampled map for publishing: leaf=%.3f m, %zu -> %zu points",
+            leaf,
+            input->points.size(),
+            output->points.size()
+        );
 
         return output;
     }

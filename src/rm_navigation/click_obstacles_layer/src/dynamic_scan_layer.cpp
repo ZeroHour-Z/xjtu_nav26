@@ -25,13 +25,16 @@ void DynamicScanLayer::onInitialize() {
         throw std::runtime_error("DynamicScanLayer: node expired");
     }
 
-    (void)node->get_parameter("enabled", enabled_);
-    (void)node->get_parameter("topic", topic_);
-    (void)node->get_parameter("obstacle_radius", obstacle_radius_);
-    (void)node->get_parameter("max_obstacle_age", max_obstacle_age_);
-    (void)node->get_parameter("transform_tolerance", transform_tolerance_);
-    (void)node->get_parameter("min_range", min_range_);
-    (void)node->get_parameter("max_range", max_range_);
+    // nav2's declareParameter() registers parameters as "<layer_name>.<param>",
+    // so they must be read back with the name_ prefix; reading the bare names
+    // always misses and silently keeps the defaults (YAML config ignored).
+    (void)node->get_parameter(name_ + ".enabled", enabled_);
+    (void)node->get_parameter(name_ + ".topic", topic_);
+    (void)node->get_parameter(name_ + ".obstacle_radius", obstacle_radius_);
+    (void)node->get_parameter(name_ + ".max_obstacle_age", max_obstacle_age_);
+    (void)node->get_parameter(name_ + ".transform_tolerance", transform_tolerance_);
+    (void)node->get_parameter(name_ + ".min_range", min_range_);
+    (void)node->get_parameter(name_ + ".max_range", max_range_);
 
     scan_sub_ = node->create_subscription<sensor_msgs::msg::LaserScan>(
         topic_,

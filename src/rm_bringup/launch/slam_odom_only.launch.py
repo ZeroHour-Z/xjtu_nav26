@@ -108,8 +108,7 @@ def generate_launch_description():
         # Fix libusb conflict with MVS SDK - prioritize system libusb
         additional_env={'LD_LIBRARY_PATH': '/usr/lib/x86_64-linux-gnu:' + os.environ.get('LD_LIBRARY_PATH', '')},
     )
-    # Default static transform map3d -> camera_init (identity)
-    # For odom-only mode, connect map to odom so RViz can display everything
+    # For odom-only mode, connect map3d to odom so RViz can display everything.
     # TF: map3d -> odom (for FAST-LIO/FASTER-LIO only)
     tf_map_to_odom = Node(
         package="tf2_ros",
@@ -125,15 +124,26 @@ def generate_launch_description():
         package="tf2_ros",
         executable="static_transform_publisher",
         name="tf_map3dto2d",
-        arguments=["0", "0", "0.25", "-1.5707963267948966", "0", "0", "map", "map3d"],
+        arguments=[
+            "--x", "0",
+            "--y", "0",
+            "--z", "0.25",
+            "--roll", "0",
+            "--pitch", "0",
+            "--yaw", "0",
+            "--frame-id", "map",
+            "--child-frame-id", "map3d",
+        ],
     )
 
-    # TF: map3d -> camera_init (for Point-LIO only)
-    tf_map3d_to_camera_init = Node(
+    # TF: map3d -> odom (for Point-LIO only). Point-LIO publishes
+    # camera_init -> body, and odom -> camera_init below aliases camera_init to
+    # the odom frame, keeping a single TF chain.
+    tf_map3d_to_odom_point_lio = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
-        name="tf_map3d_to_camera_init",
-        arguments=["0", "0", "0", "0", "0", "0", "map3d", "camera_init"],
+        name="tf_map3d_to_odom_point_lio",
+        arguments=["0", "0", "0", "0", "0", "0", "map3d", "odom"],
         condition=IfCondition(equals(backend, "point_lio")),
     )
 
@@ -151,14 +161,14 @@ def generate_launch_description():
         executable="static_transform_publisher",
         name="tf_body2base_link",
         arguments=[
-            "0.0",
-            "0.12848040398218347",
-            "-0.2932452655927712",
-            "1.5707963267948966",
-            "0.2617993877991494",
-            "0",
-            "body",
-            "base_link",
+            "--x", "0.0",
+            "--y", "0.12848040398218347",
+            "--z", "-0.2932452655927712",
+            "--roll", "0",
+            "--pitch", "0.2617993877991494",
+            "--yaw", "1.5707963267948966",
+            "--frame-id", "body",
+            "--child-frame-id", "base_link",
         ],
     )
 
@@ -188,7 +198,7 @@ def generate_launch_description():
             point_lio_ros2_node,
             tf_map_to_odom,
             tf_map3dto2d,
-            tf_map3d_to_camera_init,
+            tf_map3d_to_odom_point_lio,
             tf_odom_to_camera_init,
             tf_body2base,
             rviz_node,

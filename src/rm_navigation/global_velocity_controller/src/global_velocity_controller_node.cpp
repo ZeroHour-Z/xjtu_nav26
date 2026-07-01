@@ -4,6 +4,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/float32.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/u_int8.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2/LinearMath/Quaternion.h"
@@ -81,6 +82,39 @@ public:
         declare_parameter<double>("curvature_window_distance", 2.0); // 计算曲率的路径长度
         declare_parameter<double>("curvature_low", 0.1); // 曲率阈值下限
         declare_parameter<double>("curvature_high", 1.0); // 曲率阈值上限
+        declare_parameter<double>("path_yaw_filter_tau", 0.20);
+        declare_parameter<double>("path_yaw_max_rate", 3.0);
+
+        // 路径跟随律 (沿切线前馈 + 横向纠偏) 与终点位置闭环减速
+        declare_parameter<bool>("use_path_following", true);
+        declare_parameter<double>("cruise_speed", 1.0);
+        declare_parameter<double>("kp_cross", 1.5);
+        declare_parameter<double>("approach_distance", 0.7);
+        declare_parameter<double>("approach_gain", 1.5);
+        declare_parameter<double>("brake_latency", 0.1);
+        declare_parameter<double>("brake_stop_margin", 0.15);
+
+        // 过弯限速：预瞄前方累计转角，按“过弯甩出量 d≈v^2*sin(Φ/2)/a”反解安全速度。
+        // 直线保持全速，弯道自动压速。Theta* 是折线路径，用窗口累计转角而非逐点曲率。
+        declare_parameter<bool>("enable_corner_slowdown", true);
+        declare_parameter<double>("corner_lookahead_distance", 1.0);
+        declare_parameter<double>("corner_cut_tolerance", 0.15);
+        declare_parameter<double>("corner_min_speed", 0.3);
+
+        // 窄道检测与通过策略
+        declare_parameter<bool>("narrow_detection_enabled", true);
+        declare_parameter<std::string>("narrow_passage_topic", "/narrow_passage");
+        declare_parameter<std::string>("narrow_passage_width_topic", "/narrow_passage_width");
+        declare_parameter<double>("narrow_lookahead_distance", 1.5);
+        declare_parameter<double>("narrow_sample_step", 0.10);
+        declare_parameter<double>("narrow_scan_step", 0.03);
+        declare_parameter<double>("narrow_scan_max_side_distance", 1.2);
+        declare_parameter<double>("narrow_enter_width", 0.90);
+        declare_parameter<double>("narrow_exit_width", 1.10);
+        declare_parameter<double>("narrow_min_length", 0.40);
+        declare_parameter<int>("narrow_obstacle_cost_threshold", 99);
+        declare_parameter<bool>("narrow_treat_unknown_as_blocked", true);
+        declare_parameter<double>("narrow_speed_limit", 0.35);
 
         // 仿真相关参数
         declare_parameter<bool>("simulate", true);
@@ -134,6 +168,36 @@ public:
         curvature_window_distance_ = get_parameter("curvature_window_distance").as_double();
         curvature_low_ = get_parameter("curvature_low").as_double();
         curvature_high_ = get_parameter("curvature_high").as_double();
+        path_yaw_filter_tau_ = get_parameter("path_yaw_filter_tau").as_double();
+        path_yaw_max_rate_ = get_parameter("path_yaw_max_rate").as_double();
+
+        use_path_following_ = get_parameter("use_path_following").as_bool();
+        cruise_speed_ = get_parameter("cruise_speed").as_double();
+        kp_cross_ = get_parameter("kp_cross").as_double();
+        approach_distance_ = get_parameter("approach_distance").as_double();
+        approach_gain_ = get_parameter("approach_gain").as_double();
+        brake_latency_ = get_parameter("brake_latency").as_double();
+        brake_stop_margin_ = get_parameter("brake_stop_margin").as_double();
+
+        enable_corner_slowdown_ = get_parameter("enable_corner_slowdown").as_bool();
+        corner_lookahead_distance_ = get_parameter("corner_lookahead_distance").as_double();
+        corner_cut_tolerance_ = get_parameter("corner_cut_tolerance").as_double();
+        corner_min_speed_ = get_parameter("corner_min_speed").as_double();
+
+        narrow_detection_enabled_ = get_parameter("narrow_detection_enabled").as_bool();
+        narrow_lookahead_distance_ = get_parameter("narrow_lookahead_distance").as_double();
+        narrow_sample_step_ = get_parameter("narrow_sample_step").as_double();
+        narrow_scan_step_ = get_parameter("narrow_scan_step").as_double();
+        narrow_scan_max_side_distance_ =
+            get_parameter("narrow_scan_max_side_distance").as_double();
+        narrow_enter_width_ = get_parameter("narrow_enter_width").as_double();
+        narrow_exit_width_ = get_parameter("narrow_exit_width").as_double();
+        narrow_min_length_ = get_parameter("narrow_min_length").as_double();
+        narrow_obstacle_cost_threshold_ =
+            get_parameter("narrow_obstacle_cost_threshold").as_int();
+        narrow_treat_unknown_as_blocked_ =
+            get_parameter("narrow_treat_unknown_as_blocked").as_bool();
+        narrow_speed_limit_ = get_parameter("narrow_speed_limit").as_double();
 
         // Escape params
         escape_free_cost_value_ = get_parameter("escape_free_cost_value").as_int();
@@ -183,6 +247,14 @@ public:
             10,
             std::bind(&SimplifiedControllerNode::onRegionType, this, _1)
         );
+        narrow_passage_pub_ = create_publisher<std_msgs::msg::Bool>(
+            get_parameter("narrow_passage_topic").as_string(),
+            10
+        );
+        narrow_passage_width_pub_ = create_publisher<std_msgs::msg::Float32>(
+            get_parameter("narrow_passage_width_topic").as_string(),
+            10
+        );
 
         // Timers: separate escape and normal control loops
         control_timer_ = create_wall_timer(
@@ -205,6 +277,8 @@ private:
         } else {
             last_path_ = *msg;
             has_path_ = true;
+            narrow_passage_active_ = false;
+            narrow_passage_width_m_ = -1.0;
             // 重置PID积分和之前的状态，开始新的路径跟踪
             resetControllerState();
             RCLCPP_INFO(get_logger(), "New path received with %zu poses.", msg->poses.size());
@@ -248,6 +322,12 @@ private:
 
         if (!has_path_) {
             // 没有路径也不在逃逸时，停止机器人，并在仿真下持续发布TF
+            if (narrow_passage_active_) {
+                narrow_passage_active_ = false;
+                narrow_passage_width_m_ = -1.0;
+                narrow_path_yaw_ = std::numeric_limits<double>::quiet_NaN();
+                publishNarrowPassageState();
+            }
             publishZeroTwist();
             if (simulate_)
                 publishSimulatedTransform(now);
@@ -257,15 +337,28 @@ private:
         // 2. 在路径上寻找前瞻点(Lookahead Point)
         geometry_msgs::msg::Point lookahead_pt;
         geometry_msgs::msg::Point closest_pt;
+        double path_yaw = current_yaw;
 
         bool is_final_goal = false;
-        if (!findLookaheadPoint(current_x, current_y, lookahead_pt, closest_pt, is_final_goal)) {
+        if (!findLookaheadPoint(
+                current_x,
+                current_y,
+                lookahead_pt,
+                closest_pt,
+                path_yaw,
+                is_final_goal
+            ))
+        {
             RCLCPP_INFO_ONCE(get_logger(), "Path tracking complete or invalid path.");
             has_path_ = false; // 标记路径结束
+            narrow_passage_active_ = false;
+            publishNarrowPassageState();
             publishZeroTwist();
             resetControllerState();
             return;
         }
+
+        updateNarrowPassageState(current_x, current_y);
 
         // 3. 计算位置误差 (在map坐标系下)
         const double ex_lookahead = lookahead_pt.x - current_x;
@@ -351,40 +444,70 @@ private:
         prev_yaw_ = current_yaw; // 更新上一次的航向角
         has_prev_yaw_ = true;
 
-        // 5. 位置PID控制器 -> 输出期望速度 (在map坐标系下)
-        integral_x_ += ex_closest * dt;
-        integral_y_ += ey_closest * dt;
+        // 5. 计算期望速度 (map 坐标系)
+        double vx_map_cmd = 0.0;
+        double vy_map_cmd = 0.0;
 
-        // 简单的积分抗饱和
-        integral_x_ = std::clamp(integral_x_, -0.5, 0.5);
-        integral_y_ = std::clamp(integral_y_, -0.5, 0.5);
+        if (use_path_following_) {
+            // 到最终目标点的距离
+            const auto& goal_pos = last_path_.poses.back().pose.position;
+            const double gdx = goal_pos.x - current_x;
+            const double gdy = goal_pos.y - current_y;
+            const double dist_to_final = std::hypot(gdx, gdy);
+            const double speed_now = std::hypot(last_cmd_vx_, last_cmd_vy_);
 
-        // RCLCPP_INFO(this->get_logger(), "Integral terms: ix=%.3f, iy=%.3f", ki_xy_ * integral_x_,
-        // ki_xy_ * integral_y_);
-        const double deriv_ex = (ex_lookahead - prev_ex_) / dt;
-        const double deriv_ey = (ey_lookahead - prev_ey_) / dt;
-        const double px = ex_lookahead + 0.0 * ex_closest;
-        const double py = ey_lookahead + 0.0 * ey_closest;
+            if (dist_to_final <= approach_distance_) {
+                // 终点接近段：对目标点做位置闭环 P 控制，速度随剩余距离线性下降。
+                // 冲过目标时方向矢量自动翻转把车拉回，自带阻尼，不会像开环前馈那样反复过冲。
+                // 减去停车余量与 latency*速度（超前阻尼项），抑制链路延迟造成的过冲。
+                const double e_eff =
+                    dist_to_final - brake_stop_margin_ - speed_now * brake_latency_;
+                const double speed = std::clamp(approach_gain_ * e_eff, 0.0, cruise_speed_);
+                if (dist_to_final > 1e-6) {
+                    vx_map_cmd = speed * gdx / dist_to_final;
+                    vy_map_cmd = speed * gdy / dist_to_final;
+                }
+            } else {
+                // 巡航段：沿“最近点”的本地路径切线前馈 + 横向纠偏。
+                // 关键（防切弯）：切线取最近点方向而非前瞻点方向。否则拐角前前瞻点已越过
+                // 拐角，前馈会提前指向拐角后的方向 → 车提前内切、撞上拐角内侧。
+                std::size_t closest_idx = 0;
+                findClosestPathIndex(current_x, current_y, closest_idx);
+                const double local_yaw = computePathYawAtIndex(closest_idx);
+                const double t_x = std::cos(local_yaw);
+                const double t_y = std::sin(local_yaw);
+                const double along = ex_closest * t_x + ey_closest * t_y;
+                const double e_perp_x = ex_closest - along * t_x;
+                const double e_perp_y = ey_closest - along * t_y;
+                // 过弯限速：直线保持全速，弯道按前方累计转角自动压速
+                const double fwd_speed = computeCornerSpeedLimit(closest_idx);
+                vx_map_cmd = fwd_speed * t_x + kp_cross_ * e_perp_x;
+                vy_map_cmd = fwd_speed * t_y + kp_cross_ * e_perp_y;
+            }
+        } else {
+            // 兼容旧的纯前瞻点 PID 控制律（横向纠偏权重为 0，弯道会内切）。
+            integral_x_ += ex_closest * dt;
+            integral_y_ += ey_closest * dt;
+            integral_x_ = std::clamp(integral_x_, -0.5, 0.5);
+            integral_y_ = std::clamp(integral_y_, -0.5, 0.5);
 
-        double vx_map_cmd = kp_xy_ * px + ki_xy_ * integral_x_ + kd_xy_ * deriv_ex;
-        double vy_map_cmd = kp_xy_ * py + ki_xy_ * integral_y_ + kd_xy_ * deriv_ey;
+            const double deriv_ex = (ex_lookahead - prev_ex_) / dt;
+            const double deriv_ey = (ey_lookahead - prev_ey_) / dt;
+            const double px = ex_lookahead;
+            const double py = ey_lookahead;
 
-        prev_ex_ = px;
-        prev_ey_ = py;
+            vx_map_cmd = kp_xy_ * px + ki_xy_ * integral_x_ + kd_xy_ * deriv_ex;
+            vy_map_cmd = kp_xy_ * py + ki_xy_ * integral_y_ + kd_xy_ * deriv_ey;
+
+            prev_ex_ = px;
+            prev_ey_ = py;
+        }
 
         // 6. 航向控制,下位机只需要给出角度即可
-        double target_yaw = std::atan2(ey_lookahead, ex_lookahead);
-
-        // vx_map_cmd = 1.0; // 硬编码速度，测试使用
-        // vy_map_cmd = 0.0; // 硬编码速度，测试使用
+        double target_yaw = filterPathYaw(path_yaw, dt);
 
         // 7. 【陀螺模式修复】直接发送map坐标系速度，坐标变换在handler_node用实时航向角完成
         // 不再在这里做坐标变换，因为TF有延迟，陀螺旋转时会导致方向错误
-        // const double cos_yaw = std::cos(predicted_yaw);
-        // const double sin_yaw = std::sin(predicted_yaw);
-        // double vx_base_raw = cos_yaw * vx_map_cmd + sin_yaw * vy_map_cmd;
-        // double vy_base_raw = -sin_yaw * vx_map_cmd + cos_yaw * vy_map_cmd;
-
         // 直接使用map坐标系速度
         double vx_base_raw = vx_map_cmd;
         double vy_base_raw = vy_map_cmd;
@@ -393,6 +516,7 @@ private:
         double vx_out = std::clamp(vx_base_raw, -max_vx_, max_vx_);
         double vy_out = std::clamp(vy_base_raw, -max_vy_, max_vy_);
         applyFluctuateApproachSpeedLimit(vx_out, vy_out);
+        applyNarrowPassageSpeedLimit(vx_out, vy_out);
 
         // 加速度限制
         const double max_dv = cmd_accel_limit_linear_ * dt;
@@ -799,11 +923,223 @@ private:
         return false;
     }
 
+    bool isBlockedForNarrow(double x, double y) const {
+        int gx = 0;
+        int gy = 0;
+        if (!worldToGrid(x, y, gx, gy)) {
+            return true;
+        }
+
+        const size_t idx =
+            static_cast<size_t>(gy) * last_costmap_.info.width + static_cast<size_t>(gx);
+        if (idx >= last_costmap_.data.size()) {
+            return true;
+        }
+
+        const int8_t cost = last_costmap_.data[idx];
+        if (cost < 0) {
+            return narrow_treat_unknown_as_blocked_;
+        }
+        return static_cast<int>(cost) >= narrow_obstacle_cost_threshold_;
+    }
+
+    double scanFreeDistanceForNarrow(
+        double x,
+        double y,
+        double nx,
+        double ny,
+        double direction
+    ) const {
+        const double step = std::max(0.01, narrow_scan_step_);
+        const double max_dist = std::max(step, narrow_scan_max_side_distance_);
+        for (double d = step; d <= max_dist; d += step) {
+            const double sx = x + direction * nx * d;
+            const double sy = y + direction * ny * d;
+            if (isBlockedForNarrow(sx, sy)) {
+                return d;
+            }
+        }
+        return max_dist;
+    }
+
+    double measurePassageWidth(double x, double y, double path_yaw) const {
+        if (isBlockedForNarrow(x, y)) {
+            return 0.0;
+        }
+        const double nx = -std::sin(path_yaw);
+        const double ny = std::cos(path_yaw);
+        const double left = scanFreeDistanceForNarrow(x, y, nx, ny, 1.0);
+        const double right = scanFreeDistanceForNarrow(x, y, nx, ny, -1.0);
+        return left + right;
+    }
+
+    bool findClosestPathIndex(double rob_x, double rob_y, std::size_t& closest_idx) const {
+        if (last_path_.poses.empty()) {
+            return false;
+        }
+
+        closest_idx = 0;
+        double min_dist_sq = std::numeric_limits<double>::max();
+        for (std::size_t i = 0; i < last_path_.poses.size(); ++i) {
+            const auto& p = last_path_.poses[i].pose.position;
+            const double dx = p.x - rob_x;
+            const double dy = p.y - rob_y;
+            const double dist_sq = dx * dx + dy * dy;
+            if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
+                closest_idx = i;
+            }
+        }
+        return true;
+    }
+
+    bool updateNarrowPassageState(double rob_x, double rob_y) {
+        if (!narrow_detection_enabled_ || !has_costmap_ || last_path_.poses.size() < 2) {
+            if (narrow_passage_active_) {
+                narrow_passage_active_ = false;
+                narrow_passage_width_m_ = -1.0;
+                narrow_path_yaw_ = std::numeric_limits<double>::quiet_NaN();
+                publishNarrowPassageState();
+            }
+            return narrow_passage_active_;
+        }
+
+        std::size_t closest_idx = 0;
+        if (!findClosestPathIndex(rob_x, rob_y, closest_idx)) {
+            return narrow_passage_active_;
+        }
+
+        const bool was_active = narrow_passage_active_;
+        const double width_threshold = was_active ? narrow_exit_width_ : narrow_enter_width_;
+        const double sample_step = std::max(0.02, narrow_sample_step_);
+        const double lookahead = std::max(sample_step, narrow_lookahead_distance_);
+        const double required_length = std::max(sample_step, narrow_min_length_);
+
+        double min_width = std::numeric_limits<double>::infinity();
+        double consecutive_narrow_length = 0.0;
+        double next_sample_s = 0.0;
+        double traveled_s = 0.0;
+        bool detected = false;
+        double detected_yaw = std::numeric_limits<double>::quiet_NaN();
+
+        for (std::size_t i = closest_idx; i + 1 < last_path_.poses.size() && traveled_s <= lookahead;
+             ++i)
+        {
+            const auto& p0 = last_path_.poses[i].pose.position;
+            const auto& p1 = last_path_.poses[i + 1].pose.position;
+            const double dx = p1.x - p0.x;
+            const double dy = p1.y - p0.y;
+            const double seg_len = std::hypot(dx, dy);
+            if (seg_len < 1e-6) {
+                continue;
+            }
+
+            const double seg_yaw = std::atan2(dy, dx);
+            while (next_sample_s <= traveled_s + seg_len && next_sample_s <= lookahead) {
+                const double ratio = std::clamp((next_sample_s - traveled_s) / seg_len, 0.0, 1.0);
+                const double sx = p0.x + ratio * dx;
+                const double sy = p0.y + ratio * dy;
+                const double width = measurePassageWidth(sx, sy, seg_yaw);
+                min_width = std::min(min_width, width);
+
+                if (width < width_threshold) {
+                    consecutive_narrow_length += sample_step;
+                    if (!std::isfinite(detected_yaw)) {
+                        detected_yaw = seg_yaw;
+                    }
+                    if (consecutive_narrow_length >= required_length) {
+                        detected = true;
+                        break;
+                    }
+                } else {
+                    consecutive_narrow_length = 0.0;
+                    detected_yaw = std::numeric_limits<double>::quiet_NaN();
+                }
+
+                next_sample_s += sample_step;
+            }
+
+            if (detected) {
+                break;
+            }
+            traveled_s += seg_len;
+        }
+
+        narrow_passage_width_m_ =
+            std::isfinite(min_width) ? min_width : -1.0;
+        narrow_passage_active_ = detected;
+        narrow_path_yaw_ = detected && std::isfinite(detected_yaw)
+            ? detected_yaw
+            : std::numeric_limits<double>::quiet_NaN();
+
+        publishNarrowPassageState();
+
+        if (narrow_passage_active_ != was_active) {
+            RCLCPP_WARN(
+                get_logger(),
+                "%s narrow passage: min_width=%.2f m, yaw=%.2f rad, threshold=%.2f m",
+                narrow_passage_active_ ? "Entering" : "Leaving",
+                narrow_passage_width_m_,
+                std::isfinite(narrow_path_yaw_) ? narrow_path_yaw_ : 0.0,
+                width_threshold
+            );
+        } else {
+            RCLCPP_INFO_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                1000,
+                "Narrow passage state=%s min_width=%.2f m threshold=%.2f m",
+                narrow_passage_active_ ? "true" : "false",
+                narrow_passage_width_m_,
+                width_threshold
+            );
+        }
+
+        return narrow_passage_active_;
+    }
+
+    void publishNarrowPassageState() {
+        if (narrow_passage_pub_) {
+            std_msgs::msg::Bool msg;
+            msg.data = narrow_passage_active_;
+            narrow_passage_pub_->publish(msg);
+        }
+        if (narrow_passage_width_pub_) {
+            std_msgs::msg::Float32 msg;
+            msg.data = static_cast<float>(narrow_passage_width_m_);
+            narrow_passage_width_pub_->publish(msg);
+        }
+    }
+
+    void applyNarrowPassageSpeedLimit(double& vx, double& vy) {
+        if (!narrow_passage_active_ || narrow_speed_limit_ <= 0.0) {
+            return;
+        }
+
+        const double speed = std::hypot(vx, vy);
+        if (speed <= narrow_speed_limit_ || speed < 1e-6) {
+            return;
+        }
+
+        const double scale = narrow_speed_limit_ / speed;
+        vx *= scale;
+        vy *= scale;
+        RCLCPP_INFO_THROTTLE(
+            get_logger(),
+            *get_clock(),
+            500,
+            "Narrow passage speed limit: %.2f -> %.2f m/s",
+            speed,
+            narrow_speed_limit_
+        );
+    }
+
     bool findLookaheadPoint(
         double rob_x,
         double rob_y,
         geometry_msgs::msg::Point& pt_ahead,
         geometry_msgs::msg::Point& pt_closest,
+        double& path_yaw,
         bool& is_last
     ) {
         if (last_path_.poses.empty())
@@ -834,14 +1170,69 @@ private:
             double dy = last_path_.poses[i].pose.position.y - rob_y;
             if (std::hypot(dx, dy) > current_lookahead_distance) {
                 pt_ahead = last_path_.poses[i].pose.position;
+                path_yaw = computePathYawAtIndex(i);
                 return true;
             }
         }
 
         // 如果遍历完路径都找不到，说明机器人已经接近终点，直接返回路径的最后一个点
         pt_ahead = last_path_.poses.back().pose.position;
+        path_yaw = computePathYawAtIndex(last_path_.poses.size() - 1);
         is_last = true;
         return true;
+    }
+
+    double computePathYawAtIndex(std::size_t index) const {
+        if (last_path_.poses.size() < 2) {
+            return 0.0;
+        }
+
+        index = std::min(index, last_path_.poses.size() - 1);
+
+        for (std::size_t next = index + 1; next < last_path_.poses.size(); ++next) {
+            const auto& p0 = last_path_.poses[index].pose.position;
+            const auto& p1 = last_path_.poses[next].pose.position;
+            const double dx = p1.x - p0.x;
+            const double dy = p1.y - p0.y;
+            if (std::hypot(dx, dy) > 1e-4) {
+                return std::atan2(dy, dx);
+            }
+        }
+
+        for (std::size_t prev = index; prev > 0; --prev) {
+            const auto& p0 = last_path_.poses[prev - 1].pose.position;
+            const auto& p1 = last_path_.poses[index].pose.position;
+            const double dx = p1.x - p0.x;
+            const double dy = p1.y - p0.y;
+            if (std::hypot(dx, dy) > 1e-4) {
+                return std::atan2(dy, dx);
+            }
+        }
+
+        return 0.0;
+    }
+
+    double filterPathYaw(double raw_yaw, double dt) {
+        raw_yaw = normalizeAngle(raw_yaw);
+        if (!has_filtered_path_yaw_) {
+            filtered_path_yaw_ = raw_yaw;
+            has_filtered_path_yaw_ = true;
+            return filtered_path_yaw_;
+        }
+
+        double yaw_error = normalizeAngle(raw_yaw - filtered_path_yaw_);
+        if (path_yaw_max_rate_ > 0.0 && dt > 0.0) {
+            const double max_step = path_yaw_max_rate_ * dt;
+            yaw_error = std::clamp(yaw_error, -max_step, max_step);
+        }
+
+        if (path_yaw_filter_tau_ > 1e-6 && dt > 0.0) {
+            const double alpha = std::clamp(dt / (path_yaw_filter_tau_ + dt), 0.0, 1.0);
+            yaw_error *= alpha;
+        }
+
+        filtered_path_yaw_ = normalizeAngle(filtered_path_yaw_ + yaw_error);
+        return filtered_path_yaw_;
     }
 
     // *** 新增函数: 根据路径曲率计算动态前瞻距离 ***
@@ -909,6 +1300,35 @@ private:
         return std::clamp(lookahead, min_lookahead_distance_, max_lookahead_distance_);
     }
 
+    // 过弯限速：预瞄前方窗口内相对当前切线的最大转角 Φ，按甩出量模型
+    // d ≈ v^2*sin(Φ/2)/a 反解安全速度 v=sqrt(a*ε/sin(Φ/2))。直线 Φ≈0 → 全速。
+    double computeCornerSpeedLimit(std::size_t start_index) const {
+        if (!enable_corner_slowdown_ || last_path_.poses.size() < 3) {
+            return cruise_speed_;
+        }
+        const double yaw_start = computePathYawAtIndex(start_index);
+        double accumulated = 0.0;
+        double max_turn = 0.0;
+        for (std::size_t i = start_index; i + 1 < last_path_.poses.size(); ++i) {
+            const auto& p0 = last_path_.poses[i].pose.position;
+            const auto& p1 = last_path_.poses[i + 1].pose.position;
+            accumulated += std::hypot(p1.x - p0.x, p1.y - p0.y);
+            if (accumulated > corner_lookahead_distance_) {
+                break;
+            }
+            const double turn = std::fabs(normalizeAngle(computePathYawAtIndex(i) - yaw_start));
+            max_turn = std::max(max_turn, turn);
+        }
+
+        const double s = std::sin(0.5 * max_turn);
+        if (s < 1e-6) {
+            return cruise_speed_; // 直线，不减速
+        }
+        const double a = std::max(cmd_accel_limit_linear_, 1e-3);
+        const double v_safe = std::sqrt(a * corner_cut_tolerance_ / s);
+        return std::clamp(v_safe, corner_min_speed_, cruise_speed_);
+    }
+
     void publishZeroTwist() {
         geometry_msgs::msg::Twist zero_twist;
         cmd_pub_->publish(zero_twist);
@@ -925,6 +1345,8 @@ private:
         has_prev_time_ = false;
         has_prev_yaw_ = false;
         prev_yaw_ = 0.0;
+        has_filtered_path_yaw_ = false;
+        filtered_path_yaw_ = 0.0;
     }
 
     void publishSimulatedTransform(const rclcpp::Time& now) {
@@ -956,6 +1378,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr fluctuate_distance_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr region_sub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr narrow_passage_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr narrow_passage_width_pub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::TimerBase::SharedPtr escape_timer_;
     tf2_ros::Buffer tf_buffer_;
@@ -989,6 +1413,41 @@ private:
     double min_lookahead_distance_, max_lookahead_distance_;
     double curvature_window_distance_;
     double curvature_low_, curvature_high_;
+    double path_yaw_filter_tau_ { 0.20 };
+    double path_yaw_max_rate_ { 3.0 };
+    bool has_filtered_path_yaw_ { false };
+    double filtered_path_yaw_ { 0.0 };
+
+    // 路径跟随律 (沿切线前馈 + 横向纠偏) 与终点位置闭环减速
+    bool use_path_following_ { true };
+    double cruise_speed_ { 1.0 };
+    double kp_cross_ { 1.5 };
+    double approach_distance_ { 0.7 };
+    double approach_gain_ { 1.5 };
+    double brake_latency_ { 0.1 };
+    double brake_stop_margin_ { 0.15 };
+
+    // 过弯限速：预瞄累计转角反解安全速度，直线全速、弯道压速
+    bool enable_corner_slowdown_ { true };
+    double corner_lookahead_distance_ { 1.0 };
+    double corner_cut_tolerance_ { 0.15 };
+    double corner_min_speed_ { 0.3 };
+
+    // Narrow passage detection and driving mode
+    bool narrow_detection_enabled_ { true };
+    bool narrow_treat_unknown_as_blocked_ { true };
+    bool narrow_passage_active_ { false };
+    int narrow_obstacle_cost_threshold_ { 99 };
+    double narrow_lookahead_distance_ { 1.5 };
+    double narrow_sample_step_ { 0.10 };
+    double narrow_scan_step_ { 0.03 };
+    double narrow_scan_max_side_distance_ { 1.2 };
+    double narrow_enter_width_ { 0.90 };
+    double narrow_exit_width_ { 1.10 };
+    double narrow_min_length_ { 0.40 };
+    double narrow_speed_limit_ { 0.35 };
+    double narrow_passage_width_m_ { -1.0 };
+    double narrow_path_yaw_ { std::numeric_limits<double>::quiet_NaN() };
 
     // PID 控制器状态
     bool has_prev_time_ { false };

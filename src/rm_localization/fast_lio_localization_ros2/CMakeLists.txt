@@ -26,7 +26,7 @@ ament_export_include_directories(include)
 target_link_libraries(pcd_publisher ${PCL_LIBRARIES})
 
 add_executable(transform_fusion src/transform_fusion.cpp)
-ament_target_dependencies(transform_fusion rclcpp geometry_msgs nav_msgs tf2_ros)
+ament_target_dependencies(transform_fusion rclcpp geometry_msgs nav_msgs tf2 tf2_ros)
 
 target_link_libraries(transform_fusion Eigen3::Eigen)
 

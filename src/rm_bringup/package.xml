@@ -9,11 +9,16 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+
   <!-- Launch-time dependencies (executables provided by these packages) -->
-  <exec_depend>rclcpp</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
 
   <!-- Backends we can launch -->

@@ -22,6 +22,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <stdexcept>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 #include <std_msgs/msg/u_int8_multi_array.hpp>
@@ -45,9 +46,12 @@ public:
         this->declare_parameter<std::string>("cmd_vel_frame", "map");
         this->declare_parameter<std::string>("angular_z_mode", "yaw_angle");
         this->declare_parameter<double>("yaw_rate_preview_time", 0.15);
+        this->declare_parameter<double>("cmd_vel_predict_time", 0.08);
+        this->declare_parameter<double>("wz_filter_tau", 0.05);
         this->declare_parameter<bool>("smooth_world_velocity", true);
         this->declare_parameter<double>("world_velocity_filter_tau", 0.12);
         this->declare_parameter<double>("world_velocity_accel_limit", 1.2);
+        this->declare_parameter<std::string>("narrow_passage_topic", "/narrow_passage");
 
         chase_min_distance_ = this->get_parameter("chase_min_distance").as_double();
         stop_distance_threshold_ = this->get_parameter("stop_distance_threshold").as_double();
@@ -57,6 +61,8 @@ public:
         cmd_vel_frame_ = this->get_parameter("cmd_vel_frame").as_string();
         angular_z_mode_ = this->get_parameter("angular_z_mode").as_string();
         yaw_rate_preview_time_ = this->get_parameter("yaw_rate_preview_time").as_double();
+        cmd_vel_predict_time_ = this->get_parameter("cmd_vel_predict_time").as_double();
+        wz_filter_tau_ = this->get_parameter("wz_filter_tau").as_double();
         smooth_world_velocity_ = this->get_parameter("smooth_world_velocity").as_bool();
         world_velocity_filter_tau_ = this->get_parameter("world_velocity_filter_tau").as_double();
         world_velocity_accel_limit_ =
@@ -125,6 +131,12 @@ public:
             std::bind(&HandlerNode::onSelfRegion, this, std::placeholders::_1)
         );
 
+        narrow_passage_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            this->get_parameter("narrow_passage_topic").as_string(),
+            10,
+            std::bind(&HandlerNode::onNarrowPassage, this, std::placeholders::_1)
+        );
+
         // 声明参数
         this->declare_parameter<double>("tx_hz", 50.0);
         this->declare_parameter<double>("target_x", 0.0);
@@ -166,6 +178,7 @@ private:
     uint8_t current_region_ { 1 }; // 默认 flat
     float region_yaw_desired_ { 0.0f };
     bool region_active_ { false }; // 是否在特殊区域中
+    bool narrow_passage_active_ { false };
 
     // 区域类型回调
     void onRegionType(const std_msgs::msg::UInt8::SharedPtr msg) {
@@ -184,6 +197,10 @@ private:
 
     void onSelfRegion(const std_msgs::msg::UInt8::SharedPtr msg) {
         nav_info_.self_region = msg->data;
+    }
+
+    void onNarrowPassage(const std_msgs::msg::Bool::SharedPtr msg) {
+        narrow_passage_active_ = msg->data;
     }
 
     // 定时从 TF 更新位姿：位置、航向角、角速度估计
@@ -210,6 +227,10 @@ private:
                     while (dyaw < -M_PI)
                         dyaw += 2.0 * M_PI;
                     estimated_wz_ = dyaw / dt;
+                    // 一阶低通：差分估计的角速度噪声大，乘 predict_time 会放大抖动，先滤波
+                    const double alpha =
+                        dt / (std::max(wz_filter_tau_, 1e-3) + dt);
+                    filtered_wz_ += alpha * (estimated_wz_ - filtered_wz_);
                 }
             }
             prev_yaw_in_map_ = yaw;
@@ -241,6 +262,9 @@ private:
             smoothed_world_vx_ = 0.0;
             smoothed_world_vy_ = 0.0;
             has_smoothed_world_velocity_ = false;
+            cmd_world_vx_ = 0.0;
+            cmd_world_vy_ = 0.0;
+            has_cmd_vel_ = false;
         } else if (cmd_vel_frame_ == "base_link") {
             // Nav2 标准 Twist: linear 在 base_link 坐标系下，angular.z 是角速度。
             double vx_base = vx;
@@ -250,14 +274,14 @@ private:
             }
             nav_info_.x_speed = static_cast<float>(vx_base);
             nav_info_.y_speed = static_cast<float>(vy_base);
+            has_cmd_vel_ = false;  // base_link 链路不走 TX 时刻变换
         } else {
-            // 旧 GVC 链路: linear 是 map 坐标系速度，需要转换到电控使用的机器人坐标系。
-            const double predict_time = 0.025;
-            double predicted_yaw = yaw_in_map_ + estimated_wz_ * predict_time;
-            const double cos_yaw = std::cos(predicted_yaw);
-            const double sin_yaw = std::sin(predicted_yaw);
-            nav_info_.x_speed = static_cast<float>(cos_yaw * vx + sin_yaw * vy);
-            nav_info_.y_speed = static_cast<float>(-sin_yaw * vx + cos_yaw * vy);
+            // GVC 链路: linear 是 map 坐标系速度。这里只缓存，世界→底盘的变换推迟到
+            // publishTxPacket(100Hz) 用最新 yaw 现算，避免 onCmdVel(50Hz) 锁定的旧角度
+            // 在车自转期间过时，造成走偏与速度不均。
+            cmd_world_vx_ = vx;
+            cmd_world_vy_ = vy;
+            has_cmd_vel_ = true;
         }
 
         if (angular_z_mode_ == "yaw_rate") {
@@ -266,6 +290,21 @@ private:
         } else {
             nav_info_.yaw_desired = static_cast<float>(normalizeAngle(msg->angular.z));
         }
+    }
+
+    // 在 TX 时刻用最新 yaw 把缓存的 map 系速度变换到底盘系，补偿自转延迟
+    void updateChassisSpeedFromWorldCmd() {
+        if (cmd_vel_frame_ == "base_link" || !has_cmd_vel_) {
+            return;
+        }
+        const double predicted_yaw =
+            yaw_in_map_ + filtered_wz_ * cmd_vel_predict_time_;
+        const double cos_yaw = std::cos(predicted_yaw);
+        const double sin_yaw = std::sin(predicted_yaw);
+        nav_info_.x_speed =
+            static_cast<float>(cos_yaw * cmd_world_vx_ + sin_yaw * cmd_world_vy_);
+        nav_info_.y_speed =
+            static_cast<float>(-sin_yaw * cmd_world_vx_ + cos_yaw * cmd_world_vy_);
     }
 
     void filterBaseCommandInWorldFrame(double& vx_base, double& vy_base) {
@@ -402,9 +441,9 @@ private:
 
         bool chase_enabled = should_chase;
 
-        // 初始化参数客户端
+        // 初始化参数客户端（异步客户端：不会在订阅回调里 spin 本节点导致死锁）
         if (!bt_param_client_) {
-            bt_param_client_ = std::make_shared<rclcpp::SyncParametersClient>(
+            bt_param_client_ = std::make_shared<rclcpp::AsyncParametersClient>(
                 this->shared_from_this(),
                 kBtNodeName
             );
@@ -476,7 +515,34 @@ private:
         };
 
         try {
-            auto results = bt_param_client_->set_parameters(params);
+            bt_param_client_->set_parameters(
+                params,
+                [this](
+                    std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future
+                ) {
+                    try {
+                        for (const auto& result: future.get()) {
+                            if (!result.successful) {
+                                RCLCPP_WARN_THROTTLE(
+                                    this->get_logger(),
+                                    *this->get_clock(),
+                                    2000,
+                                    "BT param rejected: %s",
+                                    result.reason.c_str()
+                                );
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        RCLCPP_WARN_THROTTLE(
+                            this->get_logger(),
+                            *this->get_clock(),
+                            2000,
+                            "Failed to read BT param result: %s",
+                            e.what()
+                        );
+                    }
+                }
+            );
             RCLCPP_DEBUG_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
@@ -502,13 +568,13 @@ private:
                 current_region_
             );
         } catch (const std::exception& e) {
-            // RCLCPP_WARN_THROTTLE(
-            //     this->get_logger(),
-            //     *this->get_clock(),
-            //     2000,
-            //     "Failed to set BT params: %s",
-            //     e.what()
-            // );
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "Failed to dispatch BT params: %s",
+                e.what()
+            );
         }
 
         // 根据巡逻状态发布巡逻组
@@ -690,16 +756,18 @@ private:
         nav_info_.frame_header = 0x72;
         nav_info_.frame_tail = 0x4D;
 
+        // 用最新 yaw 把缓存的 map 系速度命令变换到底盘系（补偿边转边走的自转延迟）
+        updateChassisSpeedFromWorldCmd();
+
         // 使用 region_detector 发布的区域类型
         // 注意：颠簸区域（fluctuate）对电控上报为 hole，保持行为一致
         nav_info_.sentry_region = (current_region_ == sentry_region::fluctuate)
             ? static_cast<uint8_t>(sentry_region::hole)
             : current_region_;
 
-        // fluctuate 仍按 hole 上报给电控，航向使用 region_detector 从区域内路径段计算出的切向角。
-        if (region_active_ && current_region_ == sentry_region::fluctuate) {
-            nav_info_.yaw_desired = region_yaw_desired_;
-        }
+        // yaw_desired is always the path tangent angle from GVC. The controller
+        // decides whether to use it based on the narrow-passage flag below.
+        nav_info_.narrow_passage = narrow_passage_active_ ? 1 : 0;
 
         double target_map_x = 0.0, target_map_y = 0.0;
         (void)this->get_parameter("target_x", target_map_x);
@@ -712,7 +780,7 @@ private:
             1000,
             "TX -> x_speed: %.3f y_speed: %.3f x_current: %.3f y_current: %.3f "
             "x_target: %.3f y_target: %.3f yaw_current: %.3f yaw_desired: %.3f sentry_region: %d "
-            "target_region: %u self_region: %u",
+            "target_region: %u self_region: %u narrow: %u",
             nav_info_.x_speed,
             nav_info_.y_speed,
             nav_info_.x_current,
@@ -723,7 +791,8 @@ private:
             nav_info_.yaw_desired,
             nav_info_.sentry_region,
             static_cast<unsigned int>(nav_info_.target_region),
-            static_cast<unsigned int>(nav_info_.self_region)
+            static_cast<unsigned int>(nav_info_.self_region),
+            static_cast<unsigned int>(nav_info_.narrow_passage)
         );
 
         std_msgs::msg::UInt8MultiArray out_msg;
@@ -826,6 +895,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr region_yaw_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr target_region_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr self_region_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr narrow_passage_sub_;
 
     // 定时器
     rclcpp::TimerBase::SharedPtr tx_timer_;
@@ -848,6 +918,13 @@ private:
     std::string cmd_vel_frame_ { "map" };
     std::string angular_z_mode_ { "yaw_angle" };
     double yaw_rate_preview_time_ { 0.15 };
+    // map 系速度的世界→底盘变换在 TX 时刻(100Hz)用最新 yaw 现算，补偿边转边走漂移
+    double cmd_vel_predict_time_ { 0.08 };  // TX 到电控执行的下游延迟，预测 yaw 提前量
+    double wz_filter_tau_ { 0.05 };         // 角速度低通时间常数，抑制差分噪声放大
+    double filtered_wz_ { 0.0 };            // 滤波后的角速度
+    double cmd_world_vx_ { 0.0 };           // 缓存的 map 系速度命令
+    double cmd_world_vy_ { 0.0 };
+    bool has_cmd_vel_ { false };
     bool smooth_world_velocity_ { true };
     double world_velocity_filter_tau_ { 0.12 };
     double world_velocity_accel_limit_ { 1.2 };
@@ -858,7 +935,7 @@ private:
     bool enable_chase_ { true };
 
     // BT 节点参数客户端
-    std::shared_ptr<rclcpp::SyncParametersClient> bt_param_client_;
+    std::shared_ptr<rclcpp::AsyncParametersClient> bt_param_client_;
 };
 
 int main(int argc, char** argv) {

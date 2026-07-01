@@ -10,21 +10,37 @@ global_velocity_controller:
 
     # PID gains
     kp_xy: 1.0  # 提高P增益，更激进地追踪路径
-    ki_xy: 0.0
+    ki_xy: 0.01
     kd_xy: 0.0  # 降低D增益，减少抖动
 
     kp_yaw: 0.0  # 陀螺模式下不控制航向
     ki_yaw: 0.0
     kd_yaw: 0.0
 
+    # 路径跟随律：沿路径切线前馈 + 横向纠偏（全向底盘横移归位，弯道不内切）
+    use_path_following: true   # false 则回退到旧的纯前瞻点 PID 控制律
+    cruise_speed: 0.55          # 沿切线巡航速度，保持与 max_vx 一致，不降速
+    kp_cross: 0.8              # 横向偏差纠偏增益，越大越贴线（过大会抖，先从 1.0~1.5 调）
+    # 终点接近段：对目标点做位置闭环 P 控制，速度随剩余距离线性下降，冲过自动拉回不振荡
+    approach_distance: 0.7     # 进入终点闭环减速段的距离(m)，>此距离仍按巡航速度；此段内直奔目标点不跟路径，勿调太大以免抄近路偏离路径
+    approach_gain: 1.5         # 终点段位置 P 增益，越大刹得越晚越急（过大会过冲，过小收尾慢）
+    brake_latency: 0.3         # 速度比例超前刹车量(s)，越大越早刹、压过冲；只改刹车时机不改停车点
+    brake_stop_margin: 0.15    # 停车余量(m)，到终点前留出的缓冲距离
+
+    # 过弯限速：预瞄前方累计转角，按甩出量模型反解安全速度。直线保持全速，弯道自动压速
+    enable_corner_slowdown: true    # false 则弯道也保持全速
+    corner_lookahead_distance: 1.5  # 预瞄多远的路径转角(m)，越大越早为弯道减速
+    corner_cut_tolerance: 0.1       # 允许的过弯甩出量(m)，越小过弯越慢越贴线（撞角就调小）
+    corner_min_speed: 0.2           # 过弯速度下限(m/s)，防止急弯压到过慢
+
     # Limits
-    max_vx: 1.0
-    max_vy: 1.0
+    max_vx: 0.55
+    max_vy: 0.55
     max_wz: 1.0  # 提高到5.0，不限制陀螺角速度
-    fluctuate_decel_distance: 1.5       # 路径即将进入fluctuate时开始预减速的距离
-    fluctuate_prepare_distance: 1.1      # 与region_detector标志提前量保持一致
-    fluctuate_prepare_max_speed: 0.5    # 预减速段最大速度
-    fluctuate_min_approach_speed: 0.35   # 标志触发前压到低速，避免电控置0时过冲
+    fluctuate_decel_distance: 2.5       # 路径即将进入fluctuate时开始预减速的距离
+    fluctuate_prepare_distance: 1.5      # 与region_detector标志提前量保持一致
+    fluctuate_prepare_max_speed: 0.3    # 预减速段最大速度
+    fluctuate_min_approach_speed: 0.25   # 标志触发前压到低速，避免电控置0时过冲
 
     anti_windup_integral_limit_xy: 0.5
     anti_windup_integral_limit_yaw: 0.5
@@ -35,16 +51,33 @@ global_velocity_controller:
     stop_speed_threshold: 0.04
     stop_angular_threshold: 0.03
 
+    # Narrow passage detection and mode switch
+    path_yaw_filter_tau: 0.20
+    path_yaw_max_rate: 3.0
+    narrow_detection_enabled: true
+    narrow_passage_topic: /narrow_passage
+    narrow_passage_width_topic: /narrow_passage_width
+    narrow_lookahead_distance: 0.5
+    narrow_sample_step: 0.10
+    narrow_scan_step: 0.03
+    narrow_scan_max_side_distance: 1.2
+    narrow_enter_width: 0.90
+    narrow_exit_width: 1.10
+    narrow_min_length: 0.40
+    narrow_obstacle_cost_threshold: 99
+    narrow_treat_unknown_as_blocked: true
+    narrow_speed_limit: 0.4
+
     # Command rate limiting
-    cmd_accel_limit_linear: 2.0
+    cmd_accel_limit_linear: 1.0
     cmd_accel_limit_angular: 4.0 
 
     # Escape mode params
     # escape_lethal_threshold: 100
     escape_enter_cost_threshold: 99
-    escape_target_cost_threshold: 95        # 一直逃到free
+    escape_target_cost_threshold: 90        # 一直逃到free
     escape_treat_unknown_as_lethal: false
-    escape_speed: 0.8
+    escape_speed: 0.1
     escape_goal_tolerance: 0.05
     escape_max_radius_cells: 200
     escape_enter_delay_s: 1.0

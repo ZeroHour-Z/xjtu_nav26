@@ -14,6 +14,8 @@ def generate_launch_description():
     cmd_vel_frame = LaunchConfiguration("cmd_vel_frame")
     angular_z_mode = LaunchConfiguration("angular_z_mode")
     yaw_rate_preview_time = LaunchConfiguration("yaw_rate_preview_time")
+    cmd_vel_predict_time = LaunchConfiguration("cmd_vel_predict_time")
+    wz_filter_tau = LaunchConfiguration("wz_filter_tau")
     smooth_world_velocity = LaunchConfiguration("smooth_world_velocity")
     world_velocity_filter_tau = LaunchConfiguration("world_velocity_filter_tau")
     world_velocity_accel_limit = LaunchConfiguration("world_velocity_accel_limit")
@@ -37,6 +39,8 @@ def generate_launch_description():
             DeclareLaunchArgument("cmd_vel_frame", default_value="map"),
             DeclareLaunchArgument("angular_z_mode", default_value="yaw_angle"),
             DeclareLaunchArgument("yaw_rate_preview_time", default_value="0.15"),
+            DeclareLaunchArgument("cmd_vel_predict_time", default_value="0.08"),
+            DeclareLaunchArgument("wz_filter_tau", default_value="0.05"),
             DeclareLaunchArgument("smooth_world_velocity", default_value="true"),
             DeclareLaunchArgument("world_velocity_filter_tau", default_value="0.12"),
             DeclareLaunchArgument("world_velocity_accel_limit", default_value="1.2"),
@@ -85,6 +89,8 @@ def generate_launch_description():
                     "cmd_vel_frame": cmd_vel_frame,
                     "angular_z_mode": angular_z_mode,
                     "yaw_rate_preview_time": yaw_rate_preview_time,
+                    "cmd_vel_predict_time": cmd_vel_predict_time,
+                    "wz_filter_tau": wz_filter_tau,
                     "smooth_world_velocity": smooth_world_velocity,
                     "world_velocity_filter_tau": world_velocity_filter_tau,
                     "world_velocity_accel_limit": world_velocity_accel_limit,

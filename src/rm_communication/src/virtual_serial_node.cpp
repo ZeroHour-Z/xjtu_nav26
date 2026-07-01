@@ -259,7 +259,7 @@ private:
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u",
+            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u narrow=%u",
             info.x_speed,
             info.y_speed,
             info.x_current,
@@ -267,7 +267,8 @@ private:
             info.x_target,
             info.y_target,
             info.nav_state,
-            info.point_id
+            info.point_id,
+            info.narrow_passage
         );
     }
 

@@ -44,4 +44,3 @@
         pcd_save:
             pcd_save_en: false
             interval: -1
-

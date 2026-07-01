@@ -23,6 +23,10 @@ class PcdPublisherNode(Node):
 		self.declare_parameter('rate', 5.0)
 		self.declare_parameter('filter_invalid_points', True)
 		self.declare_parameter('max_abs_coord', 100000.0)
+		# Voxel downsampling of the published cloud so RViz stays responsive.
+		# global_localization re-voxelizes /map3d to map_voxel_size (0.2 m default)
+		# before ICP, so a leaf <= that does not degrade localization. <=0 disables.
+		self.declare_parameter('voxel_leaf_size', 0.1)
 
 		transient_local_qos = QoSProfile(depth=1)
 		transient_local_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -36,12 +40,25 @@ class PcdPublisherNode(Node):
 			self.points = np.zeros((0, 3), dtype=np.float32)
 		else:
 			pcd = o3d.io.read_point_cloud(path)
+			pcd = self._downsample_pcd(pcd)
 			self.points = np.asarray(pcd.points, dtype=np.float32)
 			self.points = self._sanitize_points(self.points)
-			self.get_logger().info(f'Loaded PCD: {path} with {self.points.shape[0]} valid points')
+			self.get_logger().info(f'Loaded PCD: {path} with {self.points.shape[0]} published points')
 
 		rate = float(self.get_parameter('rate').value)
 		self.timer = self.create_timer(1.0 / max(1e-6, rate), self.on_timer)
+
+	def _downsample_pcd(self, pcd):
+		leaf = float(self.get_parameter('voxel_leaf_size').value)
+		if leaf <= 0.0 or len(pcd.points) == 0:
+			return pcd
+		before = len(pcd.points)
+		pcd = pcd.voxel_down_sample(voxel_size=leaf)
+		self.get_logger().info(
+			f'Voxel-downsampled map for publishing: leaf={leaf} m, '
+			f'{before} -> {len(pcd.points)} points'
+		)
+		return pcd
 
 	def _sanitize_points(self, points: np.ndarray) -> np.ndarray:
 		if points.size == 0:

@@ -19,19 +19,19 @@ def generate_launch_description():
 
     backend_arg = DeclareLaunchArgument(
         'backend',
-        default_value='point_lio',
+        default_value='faster_lio',
         description='定位后端: fast_lio, faster_lio, point_lio'
     )
 
     map_pcd_arg = DeclareLaunchArgument(
         'map_pcd',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "test", "map2.pcd"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.pcd"]),
         description='3D 点云地图路径 (用于定位)'
     )
 
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "test", "map2.yaml"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.yaml"]),
         description='2D 栅格地图路径 (用于导航)'
     )
 
@@ -68,7 +68,7 @@ def generate_launch_description():
     )
     use_initial_pose_arg = DeclareLaunchArgument(
         'use_initial_pose',
-        default_value='true',
+        default_value='false',
         description='定位是否使用 initial_x/initial_y/initial_z/initial_yaw 作为初始位姿'
     )
 
@@ -83,7 +83,7 @@ def generate_launch_description():
         'decision', default_value='false', description='启动决策节点'
     )
     terrain_arg = DeclareLaunchArgument(
-        'terrain', default_value='false', description='启动地形分析'
+        'terrain', default_value='true', description='启动地形分析'
     )
     region_detector_arg = DeclareLaunchArgument(
         'region_detector', default_value='true', description='启动区域检测节点'

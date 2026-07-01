@@ -775,7 +775,7 @@ void LaserMapping::PublishPath(const rclcpp::Publisher<nav_msgs::msg::Path>::Sha
 
 void LaserMapping::PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr &pub_odom_aft_mapped) {
     odom_aft_mapped_.header.frame_id = "odom";
-    odom_aft_mapped_.child_frame_id = "body";
+    odom_aft_mapped_.child_frame_id = tf_imu_frame_;
     odom_aft_mapped_.header.stamp = common::get_ros_time(lidar_end_time_);  //
     SetPosestamp(odom_aft_mapped_.pose);
     pub_odom_aft_mapped->publish(odom_aft_mapped_);
@@ -791,8 +791,8 @@ void LaserMapping::PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odomet
     }
 
     geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "odom";
-    trans.child_frame_id = "body";
+    trans.header.frame_id = tf_world_frame_;
+    trans.child_frame_id = tf_imu_frame_;
     trans.header.stamp = common::get_ros_time(lidar_end_time_);
     trans.transform.translation.x = odom_aft_mapped_.pose.pose.position.x;
     trans.transform.translation.y = odom_aft_mapped_.pose.pose.position.y;
@@ -815,8 +815,8 @@ void LaserMapping::PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odomet
     rot_aligned.normalize();
 
     // ## 2. Populate the Odometry Message with the Aligned Pose ##
-    odom_aft_mapped_.header.frame_id = "odom";
-    odom_aft_mapped_.child_frame_id = "body";
+    odom_aft_mapped_.header.frame_id = tf_world_frame_;
+    odom_aft_mapped_.child_frame_id = tf_imu_frame_;
     odom_aft_mapped_.header.stamp = common::get_ros_time(lidar_end_time_);
 
     // Manually set the transformed pose instead of using SetPosestamp()
@@ -864,8 +864,8 @@ void LaserMapping::PublishOdometry(const rclcpp::Publisher<nav_msgs::msg::Odomet
 
     // ## 5. Publish the TF Transform (uses the already aligned pose) ##
     geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "odom";
-    trans.child_frame_id = "body";
+    trans.header.frame_id = tf_world_frame_;
+    trans.child_frame_id = tf_imu_frame_;
     trans.header.stamp = odom_aft_mapped_.header.stamp;
     trans.transform.translation.x = odom_aft_mapped_.pose.pose.position.x;
     trans.transform.translation.y = odom_aft_mapped_.pose.pose.position.y;

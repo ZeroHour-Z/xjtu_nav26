@@ -19,9 +19,11 @@ void ClickObstaclesLayer::onInitialize() {
         throw std::runtime_error("ClickObstaclesLayer: node expired");
     }
 
-    // Read initial parameters
-    (void)node->get_parameter("enabled", enabled_);
-    (void)node->get_parameter("obstacle_radius", obstacle_radius_);
+    // Read initial parameters. nav2's declareParameter() registers them as
+    // "<layer_name>.<param>", so they must be read back with the name_ prefix
+    // (otherwise the YAML values are silently ignored).
+    (void)node->get_parameter(name_ + ".enabled", enabled_);
+    (void)node->get_parameter(name_ + ".obstacle_radius", obstacle_radius_);
 
     sub_clicked_ = node->create_subscription<geometry_msgs::msg::PointStamped>(
         "/clicked_point",

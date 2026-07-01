@@ -6,20 +6,18 @@ region_detector_node:
     # central_highland_region: [-0.5, -4.0, -0.5, 4.0, 1.5, 4.0, 1.5, -4.0]
     # enemy_base_region: [1.5, -4.0, 1.5, 4.0, 5.0, 4.0, 5.0, -4.0]
 
-    lookahead_distance: 1.1
+    lookahead_distance: 3.0
     publish_rate: 20.0
     plan_topic: /plan
     chase_goal_topic: /chase_goal_pose
     chase_plan_goal_tolerance: 0.75
-    # fluctuate_region_1: [-0.6, -0.7, 0.9, -0.7, 0.9, -2.6, -0.6, -2.6]
     # fluctuate_region_1: [5.05, 4.6, 4.25, 4.6, 4.25, 6.2, 5.05, 6.2]
-    # fluctuate_region_1: [-0.61, 2.72, 0.20, 2.64, 0.27, 3.76, -0.42, 3.8]
     fluctuate_region_1_yaw: 0.0
-    # fluctuate_region_2: [1.5, -6.35, -1.0, -6.35, -1.0, -5.55, 1.5, -5.55] # [-3.0,2.5,-3.0,3.5,-4.5,3.5,-4.5,2.5]
-    # fluctuate_region_2: [-0.61, 2.72, 0.20, 2.64, 0.27, 3.76, -0.42, 3.8]
-    fluctuate_region_2: [1.35, -0.349, 1.52, -1.09, 2.35, -0.95, 2.06, -0.17]
+    # fluctuate_region_2: [1.5, -6.35, -1.0, -6.35, -1.0, -5.55, 1.5, -5.55]
+    fluctuate_region_2: [-2.4, -6.18, -3.49, -5.91, -3.29, -5.16, -2.2, -5.45]
     fluctuate_region_2_yaw: 0.0
-    fluctuate_region_3: [-5.05, -4.6, -4.25, -4.6, -4.25, -6.2, -5.05, -6.2]
+    # fluctuate_region_3: [-5.05, -4.6, -4.25, -4.6, -4.25, -6.2, -5.05, -6.2]
     fluctuate_region_3_yaw: 0.0
-    fluctuate_region_4: [-1.5, 6.35, 1.0, 6.35, 1.0, 5.55, -1.5, 5.55]
+    # fluctuate_region_4: [-1.5, 6.35, 1.0, 6.35, 1.0, 5.55, -1.5, 5.55]
+    fluctuate_region_4: [-1.08, -5.05, -1.81, -4.86, -0.919, -1.51, -0.16, -1.62]
     fluctuate_region_4_yaw: 0.0

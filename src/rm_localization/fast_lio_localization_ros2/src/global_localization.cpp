@@ -849,9 +849,8 @@ private:
         const auto& p = msg->pose.pose.position;
         const auto& q = msg->pose.pose.orientation;
 
-        // RViz "2D Pose Estimate" gives the desired BASE_LINK pose, expressed in
-        // the RViz fixed frame. We treat it in the localization map frame (map3d);
-        // the static map->map3d offset is a pure +Z shift that does not affect 2D.
+        // RViz "2D Pose Estimate" gives a 2D pose in the map frame. The 3D
+        // localization state is map3d -> odom, where /odom is the LIO body pose.
         Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
         Eigen::Matrix4d T_map_to_base = Eigen::Matrix4d::Identity();
         T_map_to_base.block<3, 3>(0, 0) = quat.normalized().toRotationMatrix();
@@ -876,36 +875,7 @@ private:
             return;
         }
 
-        // The /odom message is odom(=camera_init) -> <child> (point_lio child is
-        // "body", NOT base_link). Compose with the static <child> -> base_link
-        // transform so that the clicked pose actually places base_link.
-        Eigen::Matrix4d T_odom_to_child = poseToMat(*odom);
-        Eigen::Matrix4d T_odom_to_base = T_odom_to_child; // fallback: assume child == base_link
-        const std::string child_frame =
-            odom->child_frame_id.empty() ? std::string("body") : odom->child_frame_id;
-        const std::string base_frame = this->get_parameter("base_link_frame").as_string();
-        if (child_frame != base_frame) {
-            try {
-                auto tf_child_base = tf_buffer_->lookupTransform(
-                    child_frame,
-                    base_frame,
-                    tf2::TimePointZero,
-                    tf2::durationFromSec(0.2)
-                );
-                T_odom_to_base = T_odom_to_child * transformToMat(tf_child_base);
-            } catch (const tf2::TransformException& ex) {
-                RCLCPP_WARN(
-                    this->get_logger(),
-                    "TF %s->%s lookup failed (%s); assuming base_link coincides with %s",
-                    child_frame.c_str(),
-                    base_frame.c_str(),
-                    ex.what(),
-                    child_frame.c_str()
-                );
-            }
-        }
-
-        Eigen::Matrix4d candidate = T_map_to_base * inverseSE3(T_odom_to_base);
+        Eigen::Matrix4d candidate = T_map_to_base * inverseSE3(poseToMat(*odom));
         {
             std::lock_guard<std::mutex> lk(pose_mutex_);
             pending_pose_ = candidate;
