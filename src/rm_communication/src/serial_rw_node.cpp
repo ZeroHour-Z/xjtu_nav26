@@ -73,6 +73,9 @@ public:
         port_ = this->declare_parameter<std::string>("port", "/dev/ttyACM0");
         baud_ = this->declare_parameter<int>("baud", 115200);
         reopen_interval_ms_ = this->declare_parameter<int>("reopen_interval_ms", 500);
+        rx_diagnostics_ = this->declare_parameter<bool>("rx_diagnostics", false);
+        nav_rx_log_period_ms_ = this->declare_parameter<int>("nav_rx_log_period_ms", 1000);
+        aim_rx_log_period_ms_ = this->declare_parameter<int>("aim_rx_log_period_ms", 5000);
         double read_loop_hz = this->declare_parameter<double>("read_loop_hz", 200.0);
         if (read_loop_hz <= 0.0) {
             read_loop_hz = 1.0;
@@ -245,6 +248,16 @@ private:
             RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "read n: %ld", n);
 
             if (n > 0) {
+                if (rx_diagnostics_) {
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "serial RX raw: %ld bytes, first bytes: %s",
+                        static_cast<long>(n),
+                        formatBytes(buf, static_cast<size_t>(n), 8).c_str()
+                    );
+                }
                 rx_buffer_.insert(rx_buffer_.end(), buf, buf + n);
 
                 // 防止缓冲区无限增长（正常情况下 < 几百字节）
@@ -262,6 +275,15 @@ private:
             }
 
             if (n == 0) {
+                if (rx_diagnostics_) {
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        3000,
+                        "serial open but no RX bytes on %s",
+                        port_.c_str()
+                    );
+                }
                 std::this_thread::sleep_for(idle_sleep_duration_);
                 continue;
             }
@@ -281,7 +303,8 @@ private:
         }
     }
 
-    // 在 rx_buffer_ 中找下一个 nav/aim 候选帧头并校验帧尾，分别发布
+    // 在 rx_buffer_ 中找下一个 nav/aim 候选帧头，分别发布。
+    // nav 上行兼容电控未填 frame_tail 的情况：只按 0x72 + 64B 定长解析。
     void parseAndDispatch() {
         while (true) {
             // 找下一个等于 nav 或 aim 帧头的字节
@@ -291,10 +314,32 @@ private:
                 [](uint8_t b) { return b == kNavHeader || b == kAimHeader; }
             );
             if (it == rx_buffer_.end()) {
+                if (rx_diagnostics_ && !rx_buffer_.empty()) {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "RX drop %zu bytes: no known header 0x72(nav) or 0x71(aim), first bytes: %s",
+                        rx_buffer_.size(),
+                        formatBytes(rx_buffer_.data(), rx_buffer_.size(), 8).c_str()
+                    );
+                }
                 rx_buffer_.clear();
                 return;
             }
             if (it != rx_buffer_.begin()) {
+                if (rx_diagnostics_) {
+                    const size_t drop_count =
+                        static_cast<size_t>(std::distance(rx_buffer_.begin(), it));
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "RX resync: dropped %zu bytes before header 0x%02X",
+                        drop_count,
+                        static_cast<unsigned>(*it)
+                    );
+                }
                 rx_buffer_.erase(rx_buffer_.begin(), it);
             }
             if (rx_buffer_.size() < kFrameSize) {
@@ -304,7 +349,7 @@ private:
             const uint8_t header = rx_buffer_.front();
 
             bool ok = false;
-            if (header == kNavHeader && rx_buffer_[kFrameSize - 1] == kNavTailRx) {
+            if (header == kNavHeader) {
                 ok = true;
             } else if (header == kAimHeader) {
                 // 兼容性：aim 两种结构 tail 分别在 byte[54]/byte[63]；
@@ -335,6 +380,27 @@ private:
             }
 
             if (!ok) {
+                if (rx_diagnostics_) {
+                    if (header == kNavHeader) {
+                        RCLCPP_WARN_THROTTLE(
+                            this->get_logger(),
+                            *this->get_clock(),
+                            1000,
+                            "[nav] candidate rejected: head=0x72 byte[63]=0x%02X expected tail=0x21, first bytes: %s",
+                            static_cast<unsigned>(rx_buffer_[kFrameSize - 1]),
+                            formatBytes(rx_buffer_.data(), rx_buffer_.size(), 8).c_str()
+                        );
+                    } else if (header == kAimHeader) {
+                        RCLCPP_WARN_THROTTLE(
+                            this->get_logger(),
+                            *this->get_clock(),
+                            1000,
+                            "[aim] candidate rejected: byte[54]=0x%02X byte[63]=0x%02X expected 0x4C",
+                            static_cast<unsigned>(rx_buffer_[kAimAutoTailOffset]),
+                            static_cast<unsigned>(rx_buffer_[kAimWmTailOffset])
+                        );
+                    }
+                }
                 // 当前候选帧头与帧尾不匹配 -> 丢弃 1 字节继续重同步
                 rx_buffer_.erase(rx_buffer_.begin());
                 continue;
@@ -344,15 +410,24 @@ private:
             out_msg.data.assign(rx_buffer_.begin(), rx_buffer_.begin() + kFrameSize);
 
             if (header == kNavHeader) {
+                if (out_msg.data.back() != kNavTailRx) {
+                    RCLCPP_WARN_ONCE(
+                        this->get_logger(),
+                        "[nav] RX frame_tail byte[63]=0x%02X != 0x21; accepting 64B frame by header only and normalizing tail for handler_node.",
+                        static_cast<unsigned>(out_msg.data.back())
+                    );
+                    out_msg.data.back() = kNavTailRx;
+                }
                 navCommand_t n_data;
-                std::memcpy(&n_data, rx_buffer_.data(), kFrameSize);
+                std::memcpy(&n_data, out_msg.data.data(), kFrameSize);
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(),
                     *this->get_clock(),
-                    1000,
-                    "[nav] RX Color:%d State:%d Region:%d HP:%d Bullet:%d Enemy:(%.2f,%.2f) Target:(%.2f,%.2f)",
+                    nav_rx_log_period_ms_,
+                    "[nav] RX color:%d state:%d motion:%d region:%d hp:%d bullet:%d enemy:(%.2f,%.2f) target:(%.2f,%.2f)",
                     (int)n_data.color,
                     (int)n_data.eSentryState,
+                    (int)n_data.motion_allowed,
                     (int)n_data.patrol_region,
                     (int)n_data.hp_remain,
                     (int)n_data.bullet_remain,
@@ -366,7 +441,7 @@ private:
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(),
                     *this->get_clock(),
-                    1000,
+                    aim_rx_log_period_ms_,
                     "[aim] RX 64B head=0x71 tail=0x4C"
                 );
                 aim_rx_pub_->publish(out_msg);
@@ -452,6 +527,9 @@ private:
     std::string port_;
     int baud_ { 115200 };
     int reopen_interval_ms_ { 500 };
+    bool rx_diagnostics_ { true };
+    int nav_rx_log_period_ms_ { 1000 };
+    int aim_rx_log_period_ms_ { 5000 };
     std::chrono::milliseconds idle_sleep_duration_ { 1 };
 
     rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr tx_sub_;
@@ -469,6 +547,26 @@ private:
     int currentFd() const {
         std::lock_guard<std::mutex> lock(fd_mutex_);
         return fd_;
+    }
+
+    static std::string formatBytes(const uint8_t* data, size_t size, size_t max_count) {
+        static constexpr char kHex[] = "0123456789ABCDEF";
+        const size_t count = std::min(size, max_count);
+        std::string out;
+        out.reserve(count * 5 + 8);
+        for (size_t i = 0; i < count; ++i) {
+            if (i > 0) {
+                out += ' ';
+            }
+            const uint8_t b = data[i];
+            out += "0x";
+            out += kHex[(b >> 4) & 0x0F];
+            out += kHex[b & 0x0F];
+        }
+        if (size > count) {
+            out += " ...";
+        }
+        return out;
     }
 };
 

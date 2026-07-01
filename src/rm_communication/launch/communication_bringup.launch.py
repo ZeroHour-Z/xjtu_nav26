@@ -10,7 +10,11 @@ def generate_launch_description():
     baud = LaunchConfiguration("baud")
     reopen_interval_ms = LaunchConfiguration("reopen_interval_ms")
     read_loop_hz = LaunchConfiguration("read_loop_hz")
+    rx_diagnostics = LaunchConfiguration("rx_diagnostics")
+    nav_rx_log_period_ms = LaunchConfiguration("nav_rx_log_period_ms")
+    aim_rx_log_period_ms = LaunchConfiguration("aim_rx_log_period_ms")
     tx_hz = LaunchConfiguration("tx_hz")
+    tx_log_period_ms = LaunchConfiguration("tx_log_period_ms")
     cmd_vel_frame = LaunchConfiguration("cmd_vel_frame")
     angular_z_mode = LaunchConfiguration("angular_z_mode")
     yaw_rate_preview_time = LaunchConfiguration("yaw_rate_preview_time")
@@ -19,6 +23,10 @@ def generate_launch_description():
     smooth_world_velocity = LaunchConfiguration("smooth_world_velocity")
     world_velocity_filter_tau = LaunchConfiguration("world_velocity_filter_tau")
     world_velocity_accel_limit = LaunchConfiguration("world_velocity_accel_limit")
+    chassis_trapped_radius = LaunchConfiguration("chassis_trapped_radius")
+    chassis_trapped_timeout = LaunchConfiguration("chassis_trapped_timeout")
+    chassis_trapped_goal_tolerance = LaunchConfiguration("chassis_trapped_goal_tolerance")
+    motion_disallowed_clear_timeout = LaunchConfiguration("motion_disallowed_clear_timeout")
     sim_serial = LaunchConfiguration("sim_serial")
     sim_publish_hz = LaunchConfiguration("sim_publish_hz")
     sim_state = LaunchConfiguration("sim_state")
@@ -35,7 +43,11 @@ def generate_launch_description():
                 "reopen_interval_ms", default_value="500"
             ),
             DeclareLaunchArgument("read_loop_hz", default_value="200.0"),
+            DeclareLaunchArgument("rx_diagnostics", default_value="false"),
+            DeclareLaunchArgument("nav_rx_log_period_ms", default_value="1000"),
+            DeclareLaunchArgument("aim_rx_log_period_ms", default_value="5000"),
             DeclareLaunchArgument("tx_hz", default_value="100.0"),
+            DeclareLaunchArgument("tx_log_period_ms", default_value="1000"),
             DeclareLaunchArgument("cmd_vel_frame", default_value="map"),
             DeclareLaunchArgument("angular_z_mode", default_value="yaw_angle"),
             DeclareLaunchArgument("yaw_rate_preview_time", default_value="0.15"),
@@ -44,6 +56,10 @@ def generate_launch_description():
             DeclareLaunchArgument("smooth_world_velocity", default_value="true"),
             DeclareLaunchArgument("world_velocity_filter_tau", default_value="0.12"),
             DeclareLaunchArgument("world_velocity_accel_limit", default_value="1.2"),
+            DeclareLaunchArgument("chassis_trapped_radius", default_value="1.0"),
+            DeclareLaunchArgument("chassis_trapped_timeout", default_value="30.0"),
+            DeclareLaunchArgument("chassis_trapped_goal_tolerance", default_value="0.30"),
+            DeclareLaunchArgument("motion_disallowed_clear_timeout", default_value="5.0"),
             DeclareLaunchArgument("sim_serial", default_value="false"),
             DeclareLaunchArgument("sim_publish_hz", default_value="20.0"),
             DeclareLaunchArgument("sim_state", default_value="0"),
@@ -55,6 +71,7 @@ def generate_launch_description():
                 package="rm_communication",
                 executable="serial_rw_node",
                 name="serial_rw_node",
+                output="screen",
                 condition=UnlessCondition(sim_serial),
                 parameters=[
                     {
@@ -62,6 +79,9 @@ def generate_launch_description():
                         "baud": baud,
                         "reopen_interval_ms": reopen_interval_ms,
                         "read_loop_hz": read_loop_hz,
+                        "rx_diagnostics": rx_diagnostics,
+                        "nav_rx_log_period_ms": nav_rx_log_period_ms,
+                        "aim_rx_log_period_ms": aim_rx_log_period_ms,
                     }
                 ],
             ),
@@ -69,6 +89,7 @@ def generate_launch_description():
                 package="rm_communication",
                 executable="virtual_serial_node",
                 name="virtual_serial_node",
+                output="screen",
                 condition=IfCondition(sim_serial),
                 parameters=[
                     {
@@ -84,6 +105,7 @@ def generate_launch_description():
                 package="rm_communication",
                 executable="handler_node",
                 name="handler_node",
+                output="screen",
                 parameters=[{
                     "tx_hz": tx_hz,
                     "cmd_vel_frame": cmd_vel_frame,
@@ -94,6 +116,11 @@ def generate_launch_description():
                     "smooth_world_velocity": smooth_world_velocity,
                     "world_velocity_filter_tau": world_velocity_filter_tau,
                     "world_velocity_accel_limit": world_velocity_accel_limit,
+                    "tx_log_period_ms": tx_log_period_ms,
+                    "chassis_trapped_radius": chassis_trapped_radius,
+                    "chassis_trapped_timeout": chassis_trapped_timeout,
+                    "chassis_trapped_goal_tolerance": chassis_trapped_goal_tolerance,
+                    "motion_disallowed_clear_timeout": motion_disallowed_clear_timeout,
                 }],
             ),
             Node(

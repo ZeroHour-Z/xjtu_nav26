@@ -52,6 +52,11 @@ public:
         this->declare_parameter<double>("world_velocity_filter_tau", 0.12);
         this->declare_parameter<double>("world_velocity_accel_limit", 1.2);
         this->declare_parameter<std::string>("narrow_passage_topic", "/narrow_passage");
+        this->declare_parameter<double>("chassis_trapped_radius", 1.0);
+        this->declare_parameter<double>("chassis_trapped_timeout", 30.0);
+        this->declare_parameter<double>("chassis_trapped_goal_tolerance", 0.30);
+        this->declare_parameter<double>("motion_disallowed_clear_timeout", 5.0);
+        this->declare_parameter<int>("tx_log_period_ms", 1000);
 
         chase_min_distance_ = this->get_parameter("chase_min_distance").as_double();
         stop_distance_threshold_ = this->get_parameter("stop_distance_threshold").as_double();
@@ -67,6 +72,13 @@ public:
         world_velocity_filter_tau_ = this->get_parameter("world_velocity_filter_tau").as_double();
         world_velocity_accel_limit_ =
             this->get_parameter("world_velocity_accel_limit").as_double();
+        chassis_trapped_radius_ = this->get_parameter("chassis_trapped_radius").as_double();
+        chassis_trapped_timeout_ = this->get_parameter("chassis_trapped_timeout").as_double();
+        chassis_trapped_goal_tolerance_ =
+            this->get_parameter("chassis_trapped_goal_tolerance").as_double();
+        motion_disallowed_clear_timeout_ =
+            this->get_parameter("motion_disallowed_clear_timeout").as_double();
+        tx_log_period_ms_ = this->get_parameter("tx_log_period_ms").as_int();
 
         if (cmd_vel_frame_ != "base_link" && cmd_vel_frame_ != "map") {
             throw std::runtime_error("cmd_vel_frame must be 'base_link' or 'map'");
@@ -368,6 +380,8 @@ private:
         const double x = goal_in_map.pose.position.x;
         const double y = goal_in_map.pose.position.y;
         setTargetMap(x, y);
+        has_navigation_target_ = true;
+        resetChassisTrappedMonitor();
         RCLCPP_INFO(
             this->get_logger(),
             "Goal pose received: %s(%.3f, %.3f) -> %s(%.3f, %.3f)",
@@ -736,6 +750,8 @@ private:
 
         // 同步更新 map 目标缓存；TX 发包前会转换为 odom 坐标发给电控。
         setTargetMap(target_map_x, target_map_y);
+        has_navigation_target_ = true;
+        resetChassisTrappedMonitor();
 
         // RCLCPP_INFO_THROTTLE(
         //     this->get_logger(),
@@ -773,14 +789,15 @@ private:
         (void)this->get_parameter("target_x", target_map_x);
         (void)this->get_parameter("target_y", target_map_y);
         updateTxTargetInOdom(target_map_x, target_map_y);
+        updateChassisTrappedFlag();
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
-            1000,
+            tx_log_period_ms_,
             "TX -> x_speed: %.3f y_speed: %.3f x_current: %.3f y_current: %.3f "
             "x_target: %.3f y_target: %.3f yaw_current: %.3f yaw_desired: %.3f sentry_region: %d "
-            "target_region: %u self_region: %u narrow: %u",
+            "target_region: %u self_region: %u motion: %u trapped: %u narrow: %u",
             nav_info_.x_speed,
             nav_info_.y_speed,
             nav_info_.x_current,
@@ -792,6 +809,8 @@ private:
             nav_info_.sentry_region,
             static_cast<unsigned int>(nav_info_.target_region),
             static_cast<unsigned int>(nav_info_.self_region),
+            static_cast<unsigned int>(last_cmd_.motion_allowed),
+            static_cast<unsigned int>(nav_info_.chises_trapped),
             static_cast<unsigned int>(nav_info_.narrow_passage)
         );
 
@@ -813,6 +832,86 @@ private:
     void setTargetMap(double x, double y) {
         this->set_parameter(rclcpp::Parameter("target_x", x));
         this->set_parameter(rclcpp::Parameter("target_y", y));
+    }
+
+    void resetChassisTrappedMonitor() {
+        trapped_monitor_active_ = false;
+        chassis_trapped_active_ = false;
+        trapped_center_x_ = 0.0;
+        trapped_center_y_ = 0.0;
+        trapped_region_enter_time_ = this->now();
+        motion_disallowed_timing_active_ = false;
+        nav_info_.chises_trapped = 0;
+    }
+
+    void updateChassisTrappedFlag() {
+        if (last_cmd_.motion_allowed == 0) {
+            const rclcpp::Time now = this->now();
+            if (!motion_disallowed_timing_active_) {
+                motion_disallowed_timing_active_ = true;
+                motion_disallowed_since_ = now;
+            }
+
+            const double disallowed_duration = (now - motion_disallowed_since_).seconds();
+            if (disallowed_duration >= motion_disallowed_clear_timeout_) {
+                resetChassisTrappedMonitor();
+                return;
+            }
+        } else {
+            motion_disallowed_timing_active_ = false;
+        }
+
+        if (!has_navigation_target_) {
+            resetChassisTrappedMonitor();
+            return;
+        }
+
+        const double dx_goal = nav_info_.x_target - nav_info_.x_current;
+        const double dy_goal = nav_info_.y_target - nav_info_.y_current;
+        const double dist_to_goal = std::hypot(dx_goal, dy_goal);
+        if (dist_to_goal <= chassis_trapped_goal_tolerance_) {
+            resetChassisTrappedMonitor();
+            has_navigation_target_ = false;
+            return;
+        }
+
+        const rclcpp::Time now = this->now();
+        if (!trapped_monitor_active_) {
+            trapped_monitor_active_ = true;
+            trapped_center_x_ = nav_info_.x_current;
+            trapped_center_y_ = nav_info_.y_current;
+            trapped_region_enter_time_ = now;
+            chassis_trapped_active_ = false;
+            nav_info_.chises_trapped = 0;
+            return;
+        }
+
+        const double dx_center = nav_info_.x_current - trapped_center_x_;
+        const double dy_center = nav_info_.y_current - trapped_center_y_;
+        const double dist_from_center = std::hypot(dx_center, dy_center);
+        if (dist_from_center > chassis_trapped_radius_) {
+            trapped_center_x_ = nav_info_.x_current;
+            trapped_center_y_ = nav_info_.y_current;
+            trapped_region_enter_time_ = now;
+            chassis_trapped_active_ = false;
+            nav_info_.chises_trapped = 0;
+            return;
+        }
+
+        const double stuck_duration = (now - trapped_region_enter_time_).seconds();
+        const bool trapped = stuck_duration >= chassis_trapped_timeout_;
+        if (trapped != chassis_trapped_active_) {
+            chassis_trapped_active_ = trapped;
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Chassis trapped flag %s: stayed within %.2fm for %.1fs, dist_to_goal=%.2fm",
+                trapped ? "ON" : "OFF",
+                chassis_trapped_radius_,
+                stuck_duration,
+                dist_to_goal
+            );
+        }
+        nav_info_.chises_trapped = chassis_trapped_active_ ? 1 : 0;
     }
 
     bool transformPoseToMap(
@@ -933,6 +1032,20 @@ private:
     double smoothed_world_vy_ { 0.0 };
     rclcpp::Time last_cmd_filter_time_;
     bool enable_chase_ { true };
+
+    double chassis_trapped_radius_ { 1.0 };
+    double chassis_trapped_timeout_ { 30.0 };
+    double chassis_trapped_goal_tolerance_ { 0.30 };
+    double motion_disallowed_clear_timeout_ { 5.0 };
+    int tx_log_period_ms_ { 1000 };
+    bool has_navigation_target_ { false };
+    bool trapped_monitor_active_ { false };
+    bool chassis_trapped_active_ { false };
+    bool motion_disallowed_timing_active_ { false };
+    double trapped_center_x_ { 0.0 };
+    double trapped_center_y_ { 0.0 };
+    rclcpp::Time trapped_region_enter_time_;
+    rclcpp::Time motion_disallowed_since_;
 
     // BT 节点参数客户端
     std::shared_ptr<rclcpp::AsyncParametersClient> bt_param_client_;

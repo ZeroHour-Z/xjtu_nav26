@@ -56,6 +56,8 @@ class VirtualSerialNode: public rclcpp::Node {
 public:
     VirtualSerialNode(): Node("virtual_serial_node") {
         this->declare_parameter<double>("publish_hz", 20.0);
+        this->declare_parameter<int>("sim_rx_log_period_ms", 1000);
+        this->declare_parameter<int>("sim_tx_log_period_ms", 1000);
         this->declare_parameter<int64_t>("color", 0);
         this->declare_parameter<int64_t>("state", sentry_state_e::standby);
         this->declare_parameter<int64_t>("patrol_region", self_half_);
@@ -122,6 +124,8 @@ public:
         if (hz <= 0.0) {
             hz = 1.0;
         }
+        sim_rx_log_period_ms_ = this->get_parameter("sim_rx_log_period_ms").as_int();
+        sim_tx_log_period_ms_ = this->get_parameter("sim_tx_log_period_ms").as_int();
         publish_timer_ = this->create_wall_timer(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::duration<double>(1.0 / hz)
@@ -180,9 +184,10 @@ private:
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
-            1000,
-            "SIM RX -> state=%u patrol_region=%u hp=%u bullet=%u target=(%.2f, %.2f) enemy=(%.2f, %.2f)",
+            sim_rx_log_period_ms_,
+            "SIM RX -> state=%u motion=%u patrol_region=%u hp=%u bullet=%u target=(%.2f, %.2f) enemy=(%.2f, %.2f)",
             cmd.eSentryState,
+            cmd.motion_allowed,
             cmd.patrol_region,
             cmd.hp_remain,
             cmd.bullet_remain,
@@ -258,8 +263,8 @@ private:
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
-            1000,
-            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u narrow=%u",
+            sim_tx_log_period_ms_,
+            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u trapped=%u narrow=%u",
             info.x_speed,
             info.y_speed,
             info.x_current,
@@ -268,6 +273,7 @@ private:
             info.y_target,
             info.nav_state,
             info.point_id,
+            info.chises_trapped,
             info.narrow_passage
         );
     }
@@ -281,6 +287,8 @@ private:
     rclcpp::Time sequence_start_;
     std::optional<uint8_t> state_override_;
     std::optional<uint8_t> patrol_region_override_;
+    int sim_rx_log_period_ms_ { 1000 };
+    int sim_tx_log_period_ms_ { 1000 };
 };
 
 int main(int argc, char** argv) {

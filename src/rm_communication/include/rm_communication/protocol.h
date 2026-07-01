@@ -19,7 +19,7 @@ typedef struct { // 电控发送的命令数据
     float enemy_x; // 32位 敌方x坐标 (odom坐标系)
     float enemy_y; // 32位 敌方y坐标 (odom坐标系)
     uint8_t patrol_region; // 8位 巡逻区域，patrol_region_t
-    uint8_t motion_allowed; // 8位 是否允许移动（0=不允许，1=允许）
+    uint8_t motion_allowed; // 8位 是否允许移动，非死亡状态/非比赛结束状态（0=不允许，1=允许）
     uint32_t reserve_1 : 8; // 16位 保留
     uint32_t reserve_2 : 32; // 32位 保留
     uint32_t reserve_3 : 32; // 32位 保留
