@@ -29,6 +29,8 @@ def generate_launch_description():
     motion_disallowed_clear_timeout = LaunchConfiguration("motion_disallowed_clear_timeout")
     sim_serial = LaunchConfiguration("sim_serial")
     sim_publish_hz = LaunchConfiguration("sim_publish_hz")
+    sim_rx_log_period_ms = LaunchConfiguration("sim_rx_log_period_ms")
+    sim_tx_log_period_ms = LaunchConfiguration("sim_tx_log_period_ms")
     sim_state = LaunchConfiguration("sim_state")
     sim_patrol_region = LaunchConfiguration("sim_patrol_region")
     sim_auto_sequence = LaunchConfiguration("sim_auto_sequence")
@@ -62,6 +64,8 @@ def generate_launch_description():
             DeclareLaunchArgument("motion_disallowed_clear_timeout", default_value="5.0"),
             DeclareLaunchArgument("sim_serial", default_value="false"),
             DeclareLaunchArgument("sim_publish_hz", default_value="20.0"),
+            DeclareLaunchArgument("sim_rx_log_period_ms", default_value="1000"),
+            DeclareLaunchArgument("sim_tx_log_period_ms", default_value="1000"),
             DeclareLaunchArgument("sim_state", default_value="0"),
             DeclareLaunchArgument("sim_patrol_region", default_value="1"),
             DeclareLaunchArgument("sim_auto_sequence", default_value="false"),
@@ -94,6 +98,8 @@ def generate_launch_description():
                 parameters=[
                     {
                         "publish_hz": sim_publish_hz,
+                        "sim_rx_log_period_ms": sim_rx_log_period_ms,
+                        "sim_tx_log_period_ms": sim_tx_log_period_ms,
                         "state": sim_state,
                         "patrol_region": sim_patrol_region,
                         "auto_sequence": sim_auto_sequence,

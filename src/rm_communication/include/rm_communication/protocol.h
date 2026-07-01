@@ -14,7 +14,6 @@ typedef struct { // 电控发送的命令数据
     uint16_t bullet_remain; // 16位 剩余子弹值
     float target_x; // 32位 目标x坐标 (odom坐标系，当需要停止时发送x_current)
     float target_y; // 32位 目标y坐标 (odom坐标系，当需要停止时发送y_current)
-    // float    time_remain;     // 32位 剩余时间，单位秒
     uint8_t is_revive;
     float enemy_x; // 32位 敌方x坐标 (odom坐标系)
     float enemy_y; // 32位 敌方y坐标 (odom坐标系)

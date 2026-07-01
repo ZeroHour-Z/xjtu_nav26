@@ -186,7 +186,7 @@ private:
             );
             return;
         }
-        RCLCPP_INFO_THROTTLE(
+        RCLCPP_DEBUG_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             1000,
