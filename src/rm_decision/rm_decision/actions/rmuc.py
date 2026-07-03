@@ -70,11 +70,16 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		self._goal_generation = 0
 
 	def setup(self, **kwargs) -> None:
+		# 不抛异常：与 Nav2 栈同时启动时 action server 可能尚未 active，
+		# 改为在发送目标前惰性检查，保证 BT 节点仍能启动。
 		timeout_sec = float(kwargs.get("timeout", 3.0)) if "timeout" in kwargs else 3.0
 		if not self.node.has_parameter(self.region_param):
 			self.node.declare_parameter(self.region_param, 0)
 		if not self.client.wait_for_server(timeout_sec=timeout_sec):
-			raise RuntimeError("Nav2 NavigateToPose action server not available")
+			self.node.get_logger().warn(
+				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
+				f"will wait for it at tick time"
+			)
 
 	def initialise(self) -> None:
 		self._reset_goal_state()
@@ -107,6 +112,9 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 			self._retry_after = None
 
 		if not self._sent:
+			# Wait until the action server is available before sending.
+			if not self.client.server_is_ready():
+				return Status.RUNNING
 			self._send_goal(waypoints[self._waypoint_index])
 			return Status.RUNNING
 

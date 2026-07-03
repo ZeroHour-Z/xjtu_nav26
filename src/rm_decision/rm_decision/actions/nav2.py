@@ -53,9 +53,15 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 
 	def setup(self, **kwargs) -> None:
 		# kwargs may include timeout, node, visitor. Use timeout if provided; otherwise block briefly.
+		# Do NOT raise if the server is missing: when launched alongside the Nav2
+		# stack (e.g. via sentry_bringup) the action server may not be active yet.
+		# We wait for it lazily at tick time instead so the BT node still starts.
 		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
 		if not self.client.wait_for_server(timeout_sec=timeout_sec):
-			raise RuntimeError("Nav2 NavigateToPose action server not available")
+			self.node.get_logger().warn(
+				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
+				f"will wait for it at tick time"
+			)
 
 	def initialise(self) -> None:
 		self._goal_generation += 1
@@ -67,6 +73,11 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 
 	def update(self) -> Status:
 		if not self._sent:
+			# Wait until the action server is available before sending.
+			if not self.client.server_is_ready():
+				# Reset the timeout window so it measures navigation, not the wait.
+				self._start_time = self.node.get_clock().now()
+				return Status.RUNNING
 			goal_msg = NavigateToPose.Goal()
 			if self._goal_pose is None:
 				pose = PoseStamped()
@@ -185,9 +196,13 @@ class NavigateThroughPosesAction(py_trees.behaviour.Behaviour):
 		self._poses_raw = poses or []
 
 	def setup(self, **kwargs) -> None:
+		# Do NOT raise if the server is missing (see NavigateToPoseAction.setup).
 		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
 		if not self.client.wait_for_server(timeout_sec=timeout_sec):
-			raise RuntimeError("Nav2 NavigateThroughPoses action server not available")
+			self.node.get_logger().warn(
+				f"{self.name}: Nav2 NavigateThroughPoses server not ready at setup; "
+				f"will wait for it at tick time"
+			)
 
 	def initialise(self) -> None:
 		if self._succeeded:
@@ -214,6 +229,10 @@ class NavigateThroughPosesAction(py_trees.behaviour.Behaviour):
 			return Status.SUCCESS
 
 		if not self._sent:
+			# Wait until the action server is available before sending.
+			if not self.client.server_is_ready():
+				self._start_time = self.node.get_clock().now()
+				return Status.RUNNING
 			goal_msg = NavigateThroughPoses.Goal()
 			goal_msg.poses = [self._build_pose_stamped(p) for p in self._poses_raw]
 			send_future = self.client.send_goal_async(goal_msg)

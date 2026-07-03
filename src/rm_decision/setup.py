@@ -14,6 +14,7 @@ setup(
             'config/trees/RMUC.yaml',
             'config/trees/RMUL.yaml',
             'config/trees/test.yaml',
+            'config/trees/siyuan.yaml',
         ]),
         (f'share/{package_name}/launch', [
             'launch/bt.launch.py',

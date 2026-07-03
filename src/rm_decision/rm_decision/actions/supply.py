@@ -85,10 +85,15 @@ class SupplyManagerAction(py_trees.behaviour.Behaviour):
 		self._start_time = None
 
 	def setup(self, **kwargs) -> None:
-		# Ensure action server available
+		# Ensure action server available. Do NOT raise if missing: when launched
+		# alongside the Nav2 stack the server may not be active yet; we check
+		# server_is_ready() before sending a goal instead.
 		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
 		if not self.client.wait_for_server(timeout_sec=timeout_sec):
-			raise RuntimeError("Nav2 NavigateToPose action server not available")
+			self.node.get_logger().warn(
+				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
+				f"will wait for it at tick time"
+			)
 		# Declare params if absent
 		try:
 			if not self.node.has_parameter(self.hp_param):
@@ -149,6 +154,9 @@ class SupplyManagerAction(py_trees.behaviour.Behaviour):
 			return Status.RUNNING
 
 		if self._state == _SupplyState.IDLE:
+			# Wait until the action server is available before deciding/sending.
+			if (hp <= self.hp_low or ammo <= self.ammo_low) and not self.client.server_is_ready():
+				return Status.RUNNING
 			# Decide what to do: healing first, then reloading
 			if hp <= self.hp_low:
 				goal = self._build_goal(self.heal_x, self.heal_y, self.heal_yaw)

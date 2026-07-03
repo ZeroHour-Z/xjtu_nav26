@@ -54,10 +54,15 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		self.node.get_logger().info(f"ChaseDynamicPointAction: subscribed to {topic}")
 
 	def setup(self, **kwargs) -> None:
-		# 订阅已在 __init__ 中创建，这里只需等待 action server
+		# 订阅已在 __init__ 中创建，这里只需等待 action server。
+		# 不抛异常：与 Nav2 栈同时启动时(如 sentry_bringup)，action server
+		# 可能尚未 active。改为在 tick 时惰性等待，保证 BT 节点仍能启动。
 		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
 		if not self.client.wait_for_server(timeout_sec=timeout_sec):
-			raise RuntimeError("Nav2 NavigateToPose action server not available")
+			self.node.get_logger().warn(
+				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
+				f"will wait for it at tick time"
+			)
 
 	def initialise(self) -> None:
 		if self._last_send_time is None:
@@ -78,6 +83,9 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 
 		# If we got a new target, (re)send goal
 		if self._has_new_target:
+			# Wait until the action server is available before sending.
+			if not self.client.server_is_ready():
+				return Status.RUNNING
 			now = self.node.get_clock().now()
 			elapsed = (now - self._last_send_time).nanoseconds / 1e9 if self._last_send_time is not None else 1e9
 			if elapsed < self.min_resend_interval_s:

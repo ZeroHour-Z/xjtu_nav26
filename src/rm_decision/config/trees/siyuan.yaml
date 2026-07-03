@@ -1,0 +1,320 @@
+tree:
+  name: siyuan_tree
+  root:
+    type: Selector
+    name: siyuan状态决策
+    params:
+      memory: false
+    children:
+      - type: Sequence
+        name: standby_原地待命
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: standby状态?
+            params:
+              param: "standby"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布standby
+            params:
+              topic: "/sentry_actions"
+              data: "STANDBY"
+              publish_every_tick: false
+          - type: Wait
+            name: 待命保持
+            params:
+              duration_s: 999999.0
+
+      - type: Sequence
+        name: 追击模式
+        params:
+          memory: true
+        children:
+          - type: Selector
+            name: 追击条件检测
+            params:
+              memory: false
+            children:
+              - type: CheckBlackboard
+                name: 已在追击中?
+                params:
+                  key: "is_chasing"
+                  expected: true
+              - type: ParamBoolCondition
+                name: 追击参数触发?
+                params:
+                  param: "chase"
+                  expected: true
+                  latched_ok: false
+          - type: SetBlackboard
+            name: 设置追击标记
+            params:
+              key: "is_chasing"
+              value: true
+          - type: PublishString
+            name: 发布追击状态
+            params:
+              topic: "/decision_state"
+              data: "CHASING"
+              publish_every_tick: false
+          - type: Parallel
+            name: 追击执行
+            params:
+              policy: SuccessOnOne
+              synchronise: false
+            children:
+              - type: ChaseDynamicPointAction
+                name: 追击敌方目标
+                params:
+                  server_name: "navigate_to_pose"
+                  topic: "/chase_point"
+                  min_target_delta: 0.25
+                  min_resend_interval_s: 0.35
+                  publish_goal_topic: "/goal_pose"
+                  publish_chase_goal_topic: "/chase_goal_pose"
+              - type: WaitForParamBool
+                name: 等待追击结束
+                params:
+                  param: "chase"
+                  expected: false
+              - type: Sequence
+                name: 等待追击规划判定
+                params:
+                  memory: true
+                children:
+                  - type: Wait
+                    name: 等待追击新规划
+                    params:
+                      duration_s: 0.4
+                  - type: TopicBoolCondition
+                    name: 等待追击路径穿过颠簸区
+                    params:
+                      topic: "/chase_path_through_fluctuate_region"
+                      expected: true
+                      latched_ok: false
+                      default_value: false
+          - type: SetBlackboard
+            name: 清除追击标记
+            params:
+              key: "is_chasing"
+              value: false
+          - type: PublishString
+            name: 发布追击结束
+            params:
+              topic: "/decision_state"
+              data: "CHASE_ENDED"
+              publish_every_tick: false
+
+      - type: Sequence
+        name: supply_补给
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: supply状态?
+            params:
+              param: "supply"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布supply
+            params:
+              topic: "/sentry_actions"
+              data: "SUPPLY"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去补给点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: 0.0
+              y: 3.0
+              yaw: 0.0
+              timeout_s: 60
+              retry_on_failure: true
+              publish_goal_topic: "/goal_pose"
+
+      - type: Sequence
+        name: constrained_defense_约束防守
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: constrained_defense状态?
+            params:
+              param: "constrained_defense"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布constrained_defense
+            params:
+              topic: "/sentry_actions"
+              data: "CONSTRAINED_DEFENSE"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去约束防守点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: 0.0
+              y: 2.0
+              yaw: 0.0
+              timeout_s: 60
+              retry_on_failure: true
+              publish_goal_topic: "/goal_pose"
+
+      - type: Sequence
+        name: rush_base_冲基地
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: rush_base状态?
+            params:
+              param: "rush_base"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布rush_base
+            params:
+              topic: "/sentry_actions"
+              data: "RUSH_BASE"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去冲基地点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: -3.8
+              y: -5.5
+              yaw: 0.0
+              timeout_s: 60
+              retry_on_failure: true
+              publish_goal_topic: "/goal_pose"
+
+      - type: Sequence
+        name: go_attack_outpost_推前哨站
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: go_attack_outpost状态?
+            params:
+              param: "go_attack_outpost"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布go_attack_outpost
+            params:
+              topic: "/sentry_actions"
+              data: "GO_ATTACK_OUTPOST"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去推前哨站点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: -1.5
+              y: -5.9
+              yaw: 0.0
+              timeout_s: 60
+              retry_on_failure: true
+              publish_goal_topic: "/goal_pose"
+
+      - type: Sequence
+        name: hit_energy_buff_打符
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: hit_energy_buff状态?
+            params:
+              param: "hit_energy_buff"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布hit_energy_buff
+            params:
+              topic: "/sentry_actions"
+              data: "HIT_ENERGY_BUFF"
+              publish_every_tick: false
+          - type: NavigateToPoseAction
+            name: 去打符点
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              x: -1.5
+              y: -5.9
+              yaw: 0.0
+              timeout_s: 60
+              retry_on_failure: true
+              publish_goal_topic: "/goal_pose"
+
+      - type: Sequence
+        name: patrol_区域巡逻
+        params:
+          memory: false
+        children:
+          - type: ParamBoolCondition
+            name: patrol状态?
+            params:
+              param: "patrol"
+              expected: true
+              latched_ok: false
+          - type: PublishString
+            name: 发布patrol
+            params:
+              topic: "/sentry_actions"
+              data: "PATROL"
+              publish_every_tick: false
+          - type: RegionPatrolAction
+            name: 按电控区域巡逻
+            params:
+              server_name: "navigate_to_pose"
+              frame_id: "map"
+              region_param: "patrol_region"
+              default_region: 1
+              dwell_s: 5.0
+              timeout_s: 60 
+              max_retries_per_waypoint: 5
+              retry_delay_s: 2.0
+              advance_on_failure: false
+              arrival_tolerance_m: 0.25
+              base_frame: "base_link"
+              publish_goal_topic: "/goal_pose"
+              regions:
+                0:
+                  - {x: -7.0, y: -1.0, yaw: 0.0}
+                  # - {x: -5.6, y: -2.2, yaw: 0.0}
+                  # - {x: 2.5, y: -2.0, yaw: 0.0}
+                1:
+                  - {x: 0.0, y: 3.0, yaw: 0.0}
+                  - {x: -2.0, y: 2.0, yaw: 0.0}
+                  # - {x: 9.5, y: 4.5, yaw: 0.0}
+                2:
+                  # - {x: -1.4, y: -4.6, yaw: 0.0}
+                3:
+                  # - {x: 1.4, y: -4.6, yaw: 0.0}
+                4:
+                  # - {x: -3.2, y: -3.3, yaw: 0.0}
+                  # - {x: -2.2, y: -1.6, yaw: 0.0}
+                5:
+                  # - {x: 3.2, y: -3.3, yaw: 0.0}
+                  # - {x: 2.2, y: -1.6, yaw: 0.0}
+                6:
+                  - {x: -1.5, y: -5.9, yaw: 0.0}
+                  - {x: -3.8, y: -5.5, yaw: 0.0}
+                  # - {x: -1.7, y: -2.5, yaw: 0.0}
+                  # - {x: 1.0, y: -4.0, yaw: 0.0}
+                7:
+                  # - {x: 2.1, y: 3.9, yaw: 0.0}
+                8:
+                  - {x: -4.0, y: -2.0, yaw: 0.0}
+
+      - type: Wait
+        name: 未匹配状态_空转
+        params:
+          duration_s: 0.2

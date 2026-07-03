@@ -362,8 +362,12 @@ private:
         map_to_odom.header.frame_id = this->get_parameter("map_frame").as_string();
         pub_map_to_odom_->publish(map_to_odom);
 
-        RCLCPP_INFO(
+        // Throttled: init publishes (global search / multi-hypothesis / rviz) log
+        // on their first hit, while the 2 Hz relocalization loop is rate-limited.
+        RCLCPP_INFO_THROTTLE(
             this->get_logger(),
+            *this->get_clock(),
+            3000,
             "Published map3d->odom (%s): x=%.2f, y=%.2f, z=%.2f",
             reason,
             transform(0, 3),
@@ -399,8 +403,10 @@ private:
             || (region_id == 2 || region_id == 4 || region_id == 5 || region_id == 6
                 || region_id == 7))
         {
-            RCLCPP_WARN(
+            RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
+                *this->get_clock(),
+                5000,
                 "LOCALIZATION DISABLED: region=%d, map2odom_completed=%s",
                 region_id,
                 map2odom_completed ? "true" : "false"
@@ -413,10 +419,12 @@ private:
         if (mse < mse_th) {
             pose_estimation = T2;
             publishMapToOdom(T2, odom->header.stamp, "relocalization");
-            RCLCPP_INFO(this->get_logger(), "Relocalization mse: %.6f (mse_th=%.6f)", mse, mse_th);
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                "Relocalization mse: %.6f (mse_th=%.6f)", mse, mse_th);
             return true;
         } else {
-            RCLCPP_WARN(this->get_logger(), "Not match (mse=%.6f, mse_th=%.6f)", mse, mse_th);
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                "Not match (mse=%.6f, mse_th=%.6f)", mse, mse_th);
             return false;
         }
     }

@@ -431,10 +431,10 @@ private:
             // 可调参数 prediction_time_factor_，建议设为0.5~1.0
             predicted_yaw = current_yaw + estimated_wz * dt * prediction_time_factor_;
             predicted_yaw = normalizeAngle(predicted_yaw);
-            RCLCPP_INFO_THROTTLE(
+            RCLCPP_DEBUG_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
-                100,
+                500,
                 "Predicted yaw: %.3f (current: %.3f, estimated_wz: %.3f)",
                 predicted_yaw,
                 current_yaw,

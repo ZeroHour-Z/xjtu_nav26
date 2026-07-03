@@ -297,7 +297,7 @@ private:
         RCLCPP_INFO_THROTTLE(
             get_logger(),
             *this->get_clock(),
-            1000,
+            5000,
             "cells observed=%zu, lethal=%zu (step=%zu, density=%zu, both=%zu) | ground idx=%zu, obstacle idx=%zu",
             n_obs_cells,
             n_lethal_cells,
