@@ -149,6 +149,12 @@ public:
             std::bind(&HandlerNode::onNarrowPassage, this, std::placeholders::_1)
         );
 
+        fluctuate_direction_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+            "/fluctuate_direction",
+            10,
+            std::bind(&HandlerNode::onFluctuateDirection, this, std::placeholders::_1)
+        );
+
         // 声明参数
         this->declare_parameter<double>("tx_hz", 50.0);
         this->declare_parameter<double>("target_x", 0.0);
@@ -213,6 +219,10 @@ private:
 
     void onNarrowPassage(const std_msgs::msg::Bool::SharedPtr msg) {
         narrow_passage_active_ = msg->data;
+    }
+
+    void onFluctuateDirection(const std_msgs::msg::UInt8::SharedPtr msg) {
+        nav_info_.fluctuate_direction = msg->data;
     }
 
     // 定时从 TF 更新位姿：位置、航向角、角速度估计
@@ -797,7 +807,7 @@ private:
             tx_log_period_ms_,
             "TX -> x_speed: %.3f y_speed: %.3f x_current: %.3f y_current: %.3f "
             "x_target: %.3f y_target: %.3f yaw_current: %.3f yaw_desired: %.3f sentry_region: %d "
-            "target_region: %u self_region: %u motion: %u trapped: %u narrow: %u",
+            "target_region: %u self_region: %u motion: %u trapped: %u narrow: %u fluc_dir: %u",
             nav_info_.x_speed,
             nav_info_.y_speed,
             nav_info_.x_current,
@@ -811,7 +821,8 @@ private:
             static_cast<unsigned int>(nav_info_.self_region),
             static_cast<unsigned int>(last_cmd_.motion_allowed),
             static_cast<unsigned int>(nav_info_.chises_trapped),
-            static_cast<unsigned int>(nav_info_.narrow_passage)
+            static_cast<unsigned int>(nav_info_.narrow_passage),
+            static_cast<unsigned int>(nav_info_.fluctuate_direction)
         );
 
         std_msgs::msg::UInt8MultiArray out_msg;
@@ -995,6 +1006,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr target_region_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr self_region_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr narrow_passage_sub_;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr fluctuate_direction_sub_;
 
     // 定时器
     rclcpp::TimerBase::SharedPtr tx_timer_;

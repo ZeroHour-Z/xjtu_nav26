@@ -264,7 +264,7 @@ private:
             this->get_logger(),
             *this->get_clock(),
             sim_tx_log_period_ms_,
-            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u trapped=%u narrow=%u",
+            "SIM TX <- speed=(%.2f, %.2f) current=(%.2f, %.2f) target=(%.2f, %.2f) nav_state=%u point_id=%u trapped=%u narrow=%u fluc_dir=%u",
             info.x_speed,
             info.y_speed,
             info.x_current,
@@ -274,7 +274,8 @@ private:
             info.nav_state,
             info.point_id,
             info.chises_trapped,
-            info.narrow_passage
+            info.narrow_passage,
+            info.fluctuate_direction
         );
     }
 

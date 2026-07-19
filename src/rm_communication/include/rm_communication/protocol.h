@@ -52,7 +52,8 @@ typedef struct { // 发给电控：速度用机器人坐标系，位置用 odom�
     uint8_t self_region; //自身所在的区域
     uint8_t chises_trapped; // 8位 1=fluctuate1/3 与 fluctuate2/4 均无法通过
     uint8_t narrow_passage; // 8位窄道标志：1=检测到窄道，0=普通通道
-    uint32_t reserve_4 : 24; // 24位保留
+    uint8_t fluctuate_direction; // 8位 过洞方向：0=默认/上坡(先过前两点连线，再过后两点连线)，1=下坡(先过后两点连线，再过前两点连线)
+    uint32_t reserve_4 : 16; // 16位保留
     uint32_t reserve_5 : 32; // 32位保留
     uint32_t reserve_6 : 32; // 32位保留
     uint32_t reserve_7 : 32; // 32位保留

@@ -107,6 +107,8 @@ public:
             this->create_publisher<std_msgs::msg::Bool>("/path_through_fluctuate_region", 10);
         chase_path_through_fluctuate_pub_ =
             this->create_publisher<std_msgs::msg::Bool>("/chase_path_through_fluctuate_region", 10);
+        fluctuate_direction_pub_ =
+            this->create_publisher<std_msgs::msg::UInt8>("/fluctuate_direction", 10);
         target_region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/target_region", 10);
         self_region_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/self_region", 10);
         marker_pub_ =
@@ -379,6 +381,98 @@ private:
         return false;
     }
 
+    // 计算路径穿越 fluctuate 区域的方向。
+    // 区域多边形约定：前两个点(0,1)构成“前边线”，后两个点(2,3)构成“后边线”。
+    // 沿 前边线中点 -> 后边线中点 的轴向投影路径行进方向：
+    //   同向(先过前两点连线再过后两点连线) -> 0（默认/上坡）
+    //   反向(先过后两点连线再过前两点连线) -> 1（下坡）
+    // 返回 false 表示无法判定（区域顶点不足、路径未穿越或行进量太小），此时保留上一次结果。
+    bool computeFluctuateDirection(size_t region_index, const nav_msgs::msg::Path& path, uint8_t& direction)
+        const {
+        if (region_index >= regions_.size()) {
+            return false;
+        }
+        const auto& polygon = regions_[region_index].polygon;
+        if (polygon.size() < 4) {
+            return false;
+        }
+
+        const double front_mid_x = (polygon[0].first + polygon[1].first) * 0.5;
+        const double front_mid_y = (polygon[0].second + polygon[1].second) * 0.5;
+        const double back_mid_x = (polygon[2].first + polygon[3].first) * 0.5;
+        const double back_mid_y = (polygon[2].second + polygon[3].second) * 0.5;
+
+        const double axis_x = back_mid_x - front_mid_x;
+        const double axis_y = back_mid_y - front_mid_y;
+        if (std::hypot(axis_x, axis_y) < 1e-6) {
+            return false;
+        }
+
+        // 找到路径上第一个和最后一个落在区域内的点（按路径顺序）
+        bool found = false;
+        double first_x = 0.0, first_y = 0.0, last_x = 0.0, last_y = 0.0;
+        for (const auto& pose: path.poses) {
+            const double x = pose.pose.position.x;
+            const double y = pose.pose.position.y;
+            if (!isPointInPolygon(x, y, polygon)) {
+                continue;
+            }
+            if (!found) {
+                first_x = x;
+                first_y = y;
+                found = true;
+            }
+            last_x = x;
+            last_y = y;
+        }
+        if (!found) {
+            return false;
+        }
+
+        const double travel_x = last_x - first_x;
+        const double travel_y = last_y - first_y;
+        const double proj = travel_x * axis_x + travel_y * axis_y;
+        if (std::abs(proj) < 1e-6) {
+            return false;
+        }
+
+        direction = (proj > 0.0) ? 0 : 1;
+        return true;
+    }
+
+    // 找出路径按行进顺序最先遇到的 fluctuate 区域。
+    // 路径经过多个 fluctuate 区域时，返回沿路径 pose 序列中最早被穿越的那个区域索引。
+    // Nav2 的 /plan 从机器人当前位置起算，通过某区域后该区域会离开路径，
+    // 于是“最先遇到”的区域会自动前移到下一个，从而实现按先后顺序逐个上报。
+    bool findFirstFluctuateRegionOnPath(const nav_msgs::msg::Path& path, size_t& region_index)
+        const {
+        bool found = false;
+        size_t best_region = 0;
+        size_t best_path_idx = std::numeric_limits<size_t>::max();
+
+        for (size_t r = 0; r < regions_.size(); ++r) {
+            if (regions_[r].type != REGION_FLUCTUATE) {
+                continue;
+            }
+            for (size_t p = 0; p < path.poses.size(); ++p) {
+                const auto& pos = path.poses[p].pose.position;
+                if (isPointInPolygon(pos.x, pos.y, regions_[r].polygon)) {
+                    if (p < best_path_idx) {
+                        best_path_idx = p;
+                        best_region = r;
+                        found = true;
+                    }
+                    break; // 该区域的首次穿越点已找到
+                }
+            }
+        }
+
+        if (found) {
+            region_index = best_region;
+        }
+        return found;
+    }
+
     bool updatePathRegions(const nav_msgs::msg::Path& path, std::set<size_t>& path_regions) const {
         bool path_through_fluctuate = false;
         path_regions.clear();
@@ -420,7 +514,19 @@ private:
         // 普通路径状态仍然跟随 Nav2 的 /plan，用于区域预瞄和通用调试。
         path_through_fluctuate_region_ = updatePathRegions(*msg, path_regions_);
 
+        // 更新过洞方向：按行进顺序取路径最先遇到的 fluctuate 区域判定方向。
+        // 路径穿越多个 fluctuate 区域时，先上报第一个区域的上/下坡状态；
+        // 通过后该区域离开 /plan，最先遇到的区域自动变为下一个，依次上报。
+        size_t first_fluctuate_idx = 0;
+        if (findFirstFluctuateRegionOnPath(*msg, first_fluctuate_idx)) {
+            uint8_t direction = fluctuate_direction_;
+            if (computeFluctuateDirection(first_fluctuate_idx, *msg, direction)) {
+                fluctuate_direction_ = direction;
+            }
+        }
+
         publishPathThroughFluctuate();
+        publishFluctuateDirection();
 
         if (pathMatchesLatestChaseGoal(*msg)) {
             chase_path_through_fluctuate_region_ =
@@ -457,6 +563,12 @@ private:
         std_msgs::msg::Bool msg;
         msg.data = chase_path_through_fluctuate_region_;
         chase_path_through_fluctuate_pub_->publish(msg);
+    }
+
+    void publishFluctuateDirection() {
+        std_msgs::msg::UInt8 msg;
+        msg.data = fluctuate_direction_;
+        fluctuate_direction_pub_->publish(msg);
     }
 
     void onRxPacket(const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
@@ -644,6 +756,7 @@ private:
         yaw_pub_->publish(yaw_msg);
         publishPathThroughFluctuate();
         publishChasePathThroughFluctuate();
+        publishFluctuateDirection();
 
         if (has_enemy_pose_) {
             double enemy_map_x = 0.0;
@@ -956,6 +1069,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fluctuate_distance_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr path_through_fluctuate_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr chase_path_through_fluctuate_pub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr fluctuate_direction_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr target_region_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr self_region_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
@@ -974,6 +1088,7 @@ private:
     bool path_through_fluctuate_region_ { false };
     std::set<size_t> chase_path_regions_;
     bool chase_path_through_fluctuate_region_ { false };
+    uint8_t fluctuate_direction_ { 0 }; // 0=默认/上坡，1=下坡
     geometry_msgs::msg::PoseStamped latest_chase_goal_;
     bool has_chase_goal_ { false };
     std::string plan_topic_ { "/plan" };
