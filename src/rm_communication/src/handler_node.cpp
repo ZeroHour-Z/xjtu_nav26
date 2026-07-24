@@ -790,7 +790,7 @@ private:
         nav_info_.sentry_region = (current_region_ == sentry_region::fluctuate)
             ? static_cast<uint8_t>(sentry_region::hole)
             : current_region_;
-
+        
         // yaw_desired is always the path tangent angle from GVC. The controller
         // decides whether to use it based on the narrow-passage flag below.
         nav_info_.narrow_passage = narrow_passage_active_ ? 1 : 0;

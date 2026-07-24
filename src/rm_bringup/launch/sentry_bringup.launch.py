@@ -25,13 +25,13 @@ def generate_launch_description():
 
     map_pcd_arg = DeclareLaunchArgument(
         'map_pcd',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.pcd"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "home.pcd"]),
         description='3D 点云地图路径 (用于定位)'
     )
 
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
-        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "map.yaml"]),
+        default_value=PathJoinSubstitution([FindPackageShare("rm_bringup"), "PCD", "siyuan", "home.yaml"]),
         description='2D 栅格地图路径 (用于导航)'
     )
 

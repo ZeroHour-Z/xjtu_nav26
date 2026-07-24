@@ -19,6 +19,11 @@ typedef struct { // 电控发送的命令数据
     float enemy_y; // 32位 敌方y坐标 (odom坐标系)
     uint8_t patrol_region; // 8位 巡逻区域，patrol_region_t
     uint8_t motion_allowed; // 8位 是否允许移动，非死亡状态/非比赛结束状态（0=不允许，1=允许）
+    uint8_t posture; // 8位 姿态
+    uint8_t posture_reinforce; // 8位 姿态强化
+    uint16_t stage_remain_time; //16位 比赛剩余时间
+    uint16_t power_limit; // 16位 功率上限
+    uint16_t cooling_value; // 16位 冷却值
     uint32_t reserve_1 : 8; // 16位 保留
     uint32_t reserve_2 : 32; // 32位 保留
     uint32_t reserve_3 : 32; // 32位 保留
@@ -27,8 +32,6 @@ typedef struct { // 电控发送的命令数据
     uint32_t reserve_6 : 32; // 32位 保留
     uint32_t reserve_7 : 32; // 32位 保留
     uint32_t reserve_8 : 32; // 32位 保留
-    uint32_t reserve_9 : 32; // 32位 保留
-    uint32_t reserve_10 : 32; // 32位 保留
     uint8_t frame_tail; // 帧尾 0x21
 } navCommand_t;
 #pragma pack()
