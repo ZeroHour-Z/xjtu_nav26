@@ -5,6 +5,7 @@ import py_trees
 from py_trees.common import Status
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
 from geometry_msgs.msg import PoseStamped
 
@@ -26,6 +27,8 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		timeout_s: Optional[float] = None,
 		cancel_on_terminate: bool = True,
 		retry_on_failure: bool = False,
+		retry_on_reject: bool = True,
+		retry_delay_s: float = 1.0,
 		publish_goal_topic: str = "",
 	):
 		super().__init__(name)
@@ -38,6 +41,11 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		self.timeout_s = timeout_s
 		self.cancel_on_terminate = cancel_on_terminate
 		self.retry_on_failure = retry_on_failure
+		# 启动初期 Nav2 生命周期节点可能已就绪但尚未 activate，goal 会被拒。
+		# 默认对被拒的目标延时重发，而不是终态失败。
+		self.retry_on_reject = bool(retry_on_reject)
+		self.retry_delay_s = max(0.0, float(retry_delay_s))
+		self._retry_after = None
 		self._start_time = None
 		self._goal_pose = goal_pose
 		self._frame_id = frame_id
@@ -56,8 +64,10 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		# Do NOT raise if the server is missing: when launched alongside the Nav2
 		# stack (e.g. via sentry_bringup) the action server may not be active yet.
 		# We wait for it lazily at tick time instead so the BT node still starts.
-		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
-		if not self.client.wait_for_server(timeout_sec=timeout_sec):
+		# 非阻塞探测：不在 setup 阶段阻塞等待 server（自动启动时 Nav2 可能还没起来，
+		# 多个动作串行各等几秒会撑爆 py_trees_ros 的 setup 总超时预算导致节点崩溃）。
+		# tick 时用 server_is_ready() 惰性等待即可。
+		if not self.client.wait_for_server(timeout_sec=0.0):
 			self.node.get_logger().warn(
 				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
 				f"will wait for it at tick time"
@@ -69,9 +79,16 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 		self._goal_handle = None
 		self._result_future = None
 		self._goal_rejected = False
+		self._retry_after = None
 		self._start_time = self.node.get_clock().now()
 
 	def update(self) -> Status:
+		# 被拒后的重发延时窗口
+		if self._retry_after is not None:
+			if self.node.get_clock().now() < self._retry_after:
+				return Status.RUNNING
+			self._retry_after = None
+
 		if not self._sent:
 			# Wait until the action server is available before sending.
 			if not self.client.server_is_ready():
@@ -106,6 +123,18 @@ class NavigateToPoseAction(py_trees.behaviour.Behaviour):
 			return Status.RUNNING
 
 		if self._goal_rejected:
+			# 目标被拒（常见于启动初期 Nav2 尚未 activate）：延时重发而不是终态失败
+			if self.retry_on_reject:
+				self.node.get_logger().warn(
+					f"{self.name}: goal rejected, resending after {self.retry_delay_s:.1f}s"
+				)
+				self._sent = False
+				self._goal_handle = None
+				self._result_future = None
+				self._goal_rejected = False
+				self._retry_after = self.node.get_clock().now() + Duration(seconds=self.retry_delay_s)
+				self._start_time = self.node.get_clock().now()
+				return Status.RUNNING
 			return Status.FAILURE
 
 		# timeout handling
@@ -196,9 +225,8 @@ class NavigateThroughPosesAction(py_trees.behaviour.Behaviour):
 		self._poses_raw = poses or []
 
 	def setup(self, **kwargs) -> None:
-		# Do NOT raise if the server is missing (see NavigateToPoseAction.setup).
-		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
-		if not self.client.wait_for_server(timeout_sec=timeout_sec):
+		# 非阻塞探测（见 NavigateToPoseAction.setup 说明）。
+		if not self.client.wait_for_server(timeout_sec=0.0):
 			self.node.get_logger().warn(
 				f"{self.name}: Nav2 NavigateThroughPoses server not ready at setup; "
 				f"will wait for it at tick time"

@@ -241,17 +241,22 @@ tree:
               topic: "/sentry_actions"
               data: "HIT_ENERGY_BUFF"
               publish_every_tick: false
-          - type: NavigateToPoseAction
-            name: 去打符点
+          - type: NavigateWithFallbackAction
+            name: 去打符点(卡住换点)
             params:
               server_name: "navigate_to_pose"
               frame_id: "map"
-              x: -1.5
-              y: -5.9
-              yaw: 0.0
+              trapped_topic: "/chassis_trapped"
+              switch_on_trapped: true
+              switch_on_failure: true
               timeout_s: 60
-              retry_on_failure: true
+              arrival_tolerance_m: 0.25
+              base_frame: "base_link"
               publish_goal_topic: "/goal_pose"
+              # 依次尝试的打符候选点：卡在半路无法抵达时自动换下一个
+              waypoints:
+                - {x: -1.5, y: -5.9, yaw: 0.0}   # 主打符点
+                - {x: -3.8, y: -5.5, yaw: 0.0}   # 备用打符点
 
       - type: Sequence
         name: patrol_区域巡逻
@@ -278,13 +283,19 @@ tree:
               region_param: "patrol_region"
               default_region: 1
               dwell_s: 5.0
-              timeout_s: 60 
+              timeout_s: 60
               max_retries_per_waypoint: 5
               retry_delay_s: 2.0
               advance_on_failure: false
               arrival_tolerance_m: 0.25
               base_frame: "base_link"
               publish_goal_topic: "/goal_pose"
+              # 卡住(收到 /chassis_trapped)时，整套切到本区的 regions_fallback 备用点集；
+              # 到达任一备用点后再切回主套 regions 重新巡逻。
+              # 某区若未配置 regions_fallback，则维持原有的失败重试行为。
+              trapped_topic: "/chassis_trapped"
+              switch_on_trapped: true
+              # 主套巡逻点
               regions:
                 0:
                   # - {x: 0.0, y: -10.8, yaw: 0.0}
@@ -315,6 +326,21 @@ tree:
                 8:
                   - {x: 1.5, y: -8.42, yaw: 0.0}
                   - {x: -0.7, y: -8.49, yaw: 0.0}
+              # 备用套：卡住时改去这些点（按区一一对应）。留空的区不启用换套，
+              # 仍走原有重试逻辑。请按赛场填真实的备用点坐标。
+              regions_fallback:
+                0:
+                  # - {x: 0.0, y: 0.0, yaw: 0.0}
+                1:
+                  # - {x: 0.0, y: 0.0, yaw: 0.0}
+                2:
+                3:
+                4:
+                5:
+                6:
+                  # - {x: 0.0, y: 0.0, yaw: 0.0}
+                7:
+                8:
 
       - type: Wait
         name: 未匹配状态_空转

@@ -9,6 +9,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from ..registry import register
@@ -24,6 +25,7 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		frame_id: str = "map",
 		region_param: str = "patrol_region",
 		regions: Optional[Dict] = None,
+		regions_fallback: Optional[Dict] = None,
 		default_region: Optional[int] = None,
 		dwell_s: float = 2.0,
 		timeout_s: Optional[float] = None,
@@ -34,6 +36,8 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		base_frame: str = "base_link",
 		cancel_on_terminate: bool = True,
 		publish_goal_topic: str = "/goal_pose",
+		trapped_topic: str = "/chassis_trapped",
+		switch_on_trapped: bool = True,
 	):
 		super().__init__(name)
 		self.node = node
@@ -41,6 +45,7 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		self.frame_id = frame_id
 		self.region_param = region_param.lstrip("/")
 		self.regions = self._normalise_regions(regions or {})
+		self.regions_fallback = self._normalise_regions(regions_fallback or {})
 		self.default_region = default_region
 		self.dwell_s = float(dwell_s)
 		self.timeout_s = timeout_s
@@ -57,6 +62,13 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 			if publish_goal_topic
 			else None
 		)
+		self.switch_on_trapped = bool(switch_on_trapped)
+		self._trapped = False
+		self._trapped_sub = (
+			self.node.create_subscription(Bool, str(trapped_topic), self._on_trapped, 10)
+			if trapped_topic
+			else None
+		)
 		self._goal_handle = None
 		self._result_future = None
 		self._goal_rejected = False
@@ -68,20 +80,26 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		self._retry_count = 0
 		self._retry_after = None
 		self._goal_generation = 0
+		# 卡住后切到备用套(regions_fallback)。到达任一备用点后切回主套。
+		self._using_fallback = False
 
 	def setup(self, **kwargs) -> None:
 		# 不抛异常：与 Nav2 栈同时启动时 action server 可能尚未 active，
 		# 改为在发送目标前惰性检查，保证 BT 节点仍能启动。
-		timeout_sec = float(kwargs.get("timeout", 3.0)) if "timeout" in kwargs else 3.0
+		# 非阻塞探测：不在 setup 阶段阻塞等待 server（自动启动时多个动作串行
+		# 各等几秒会撑爆 py_trees_ros 的 setup 总超时预算导致节点崩溃）。
 		if not self.node.has_parameter(self.region_param):
 			self.node.declare_parameter(self.region_param, 0)
-		if not self.client.wait_for_server(timeout_sec=timeout_sec):
+		if not self.client.wait_for_server(timeout_sec=0.0):
 			self.node.get_logger().warn(
 				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
 				f"will wait for it at tick time"
 			)
 
 	def initialise(self) -> None:
+		# 重新进入巡逻分支时回到主套
+		self._using_fallback = False
+		self._trapped = False
 		self._reset_goal_state()
 
 	def update(self) -> Status:
@@ -97,6 +115,8 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 			self._waypoint_index = 0
 			self._retry_count = 0
 			self._retry_after = None
+			# 换区时回到主套
+			self._using_fallback = False
 			self._reset_goal_state()
 
 		if self._dwell_start is not None:
@@ -124,9 +144,26 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 			)
 			self._cancel_goal()
 			self._retry_count = 0
+			if self._handle_arrival():
+				return Status.RUNNING
 			self._dwell_start = self.node.get_clock().now()
 			self._reset_goal_state(keep_dwell=True, keep_retry=True)
 			return Status.RUNNING
+
+		# 底盘卡住：整套切到备用点集(regions_fallback)，而不是在当前套里顺移
+		if self.switch_on_trapped and self._trapped and not self._using_fallback:
+			if self._fallback_waypoints(region_id):
+				self.node.get_logger().warn(
+					f"RegionPatrolAction: chassis trapped in region={region_id}, "
+					f"switching to fallback waypoint set"
+				)
+				self._cancel_goal()
+				self._trapped = False
+				self._switch_to_fallback()
+				return Status.RUNNING
+			else:
+				# 该区没有配置备用套：清掉标志，维持原有重试行为
+				self._trapped = False
 
 		if self._goal_rejected:
 			self._handle_goal_failure(len(waypoints), "goal rejected")
@@ -146,6 +183,8 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 				status_code = getattr(self._goal_handle, "status", None)
 			if status_code == 4:
 				self._retry_count = 0
+				if self._handle_arrival():
+					return Status.RUNNING
 				self._dwell_start = self.node.get_clock().now()
 			else:
 				self._handle_goal_failure(len(waypoints), f"goal status={status_code}")
@@ -165,12 +204,28 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		except Exception:
 			return int(self.default_region or 0)
 
-	def _waypoints_for_region(self, region_id: int) -> List[dict]:
-		if region_id in self.regions:
-			return self.regions[region_id]
-		if self.default_region is not None and self.default_region in self.regions:
-			return self.regions[self.default_region]
+	def _lookup(self, table: Dict[int, List[dict]], region_id: int) -> List[dict]:
+		if region_id in table:
+			return table[region_id]
+		if self.default_region is not None and self.default_region in table:
+			return table[self.default_region]
 		return []
+
+	def _main_waypoints(self, region_id: int) -> List[dict]:
+		return self._lookup(self.regions, region_id)
+
+	def _fallback_waypoints(self, region_id: int) -> List[dict]:
+		return self._lookup(self.regions_fallback, region_id)
+
+	def _waypoints_for_region(self, region_id: int) -> List[dict]:
+		# 根据当前是否处于备用模式，返回对应的一套点。
+		# 备用套为空时退回主套（相当于没有配置备用点，行为与旧版一致）。
+		if self._using_fallback:
+			fb = self._fallback_waypoints(region_id)
+			if fb:
+				return fb
+			self._using_fallback = False
+		return self._main_waypoints(region_id)
 
 	def _send_goal(self, waypoint: dict) -> None:
 		pose = self._build_pose(waypoint)
@@ -186,6 +241,9 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		)
 		self._sent = True
 		self._start_time = self.node.get_clock().now()
+		# 发送新目标后清除卡住标志：电控端收到新 /goal_pose 会复位监测，
+		# 本地也先清除，避免用旧标志立即再次换点。
+		self._trapped = False
 		self.node.get_logger().info(
 			f"RegionPatrolAction: region={self._active_region}, waypoint={self._waypoint_index}, "
 			f"goal=({pose.pose.position.x:.2f}, {pose.pose.position.y:.2f})"
@@ -238,6 +296,34 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		if not keep_retry:
 			self._retry_after = None
 
+	def _switch_to_fallback(self) -> None:
+		"""卡住时整套切到备用点集，从备用套第 0 个点开始。"""
+		self._using_fallback = True
+		self._waypoint_index = 0
+		self._retry_count = 0
+		self._retry_after = None
+		self._reset_goal_state()
+
+	def _handle_arrival(self) -> bool:
+		"""到达一个航点后的处理。
+
+		返回 True 表示已切回主套并需要本 tick 直接重发（跳过停留）。
+		到达备用套的任一点后即切回主套重新巡逻；到达主套点则返回 False，
+		沿用正常的停留(dwell)+顺移节奏。
+		"""
+		if self._using_fallback:
+			self.node.get_logger().info(
+				"RegionPatrolAction: reached a fallback waypoint, switching back to main set"
+			)
+			self._using_fallback = False
+			self._waypoint_index = 0
+			self._retry_count = 0
+			self._retry_after = None
+			self._dwell_start = None
+			self._reset_goal_state()
+			return True
+		return False
+
 	def _handle_goal_failure(self, waypoint_count: int, reason: str) -> None:
 		if not self.advance_on_failure or self._retry_count < self.max_retries_per_waypoint:
 			self._retry_count += 1
@@ -263,6 +349,9 @@ class RegionPatrolAction(py_trees.behaviour.Behaviour):
 		self._retry_count = 0
 		self._retry_after = None
 		self._reset_goal_state()
+
+	def _on_trapped(self, msg: Bool) -> None:
+		self._trapped = bool(msg.data)
 
 	def _on_goal_response(self, future, generation: int):
 		if generation != self._goal_generation:
