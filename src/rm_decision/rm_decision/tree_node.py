@@ -90,7 +90,16 @@ class BTNode(Node):
 			self.tree = ros_trees.BehaviourTree(root)
 			self.tree.visitors.append(self.snapshot_visitor)
 			self._attach_text_output_handlers()
-			self.tree.setup(timeout_sec=3.0)
+			# 关键：即使 setup 超时/失败（比如自动启动时 rm_bringup/Nav2 还没起来），
+			# 也绝不让节点崩溃退出。各动作在 tick 时用 server_is_ready() 惰性等待
+			# Nav2，所以这里失败没关系，照常起定时器让树跑起来。
+			try:
+				self.tree.setup(timeout_sec=3.0)
+			except Exception as exc:
+				self.get_logger().warn(
+					f"BT setup incomplete (Nav2 may not be up yet): {exc}; "
+					f"continuing, actions will connect lazily at tick time"
+				)
 			# Use ROS timer to tick instead of blocking tick_tock
 			self.timer = self.create_timer(1.0 / max(1e-3, self.tick_hz), self._on_timer)
 		else:

@@ -95,6 +95,10 @@ public:
         chase_point_pub_ =
             this->create_publisher<geometry_msgs::msg::PoseStamped>(chase_topic_, 10);
 
+        // 底盘卡住标志发布器（供决策层行为树读取，用于切换备选目标点）
+        chassis_trapped_pub_ =
+            this->create_publisher<std_msgs::msg::Bool>("/chassis_trapped", 10);
+
         RCLCPP_INFO(this->get_logger(), "Chase mode enabled: %s", enable_chase_ ? "true" : "false");
 
         // 电控数据订阅
@@ -801,6 +805,13 @@ private:
         updateTxTargetInOdom(target_map_x, target_map_y);
         updateChassisTrappedFlag();
 
+        // 把卡住标志发布到 ROS 话题，供决策层读取（决策层据此切换备选目标点）
+        if (chassis_trapped_pub_) {
+            std_msgs::msg::Bool trapped_msg;
+            trapped_msg.data = (nav_info_.chises_trapped != 0);
+            chassis_trapped_pub_->publish(trapped_msg);
+        }
+
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
@@ -993,6 +1004,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr tx_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr patrol_group_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr chase_point_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr chassis_trapped_pub_;
 
     // 上次状态（用于检测状态变化）
     sentry_state_e last_sentry_state_ { sentry_state_e::standby };

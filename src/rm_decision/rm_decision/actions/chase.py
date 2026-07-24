@@ -54,11 +54,12 @@ class ChaseDynamicPointAction(py_trees.behaviour.Behaviour):
 		self.node.get_logger().info(f"ChaseDynamicPointAction: subscribed to {topic}")
 
 	def setup(self, **kwargs) -> None:
-		# 订阅已在 __init__ 中创建，这里只需等待 action server。
+		# 订阅已在 __init__ 中创建，这里只需探测 action server。
 		# 不抛异常：与 Nav2 栈同时启动时(如 sentry_bringup)，action server
 		# 可能尚未 active。改为在 tick 时惰性等待，保证 BT 节点仍能启动。
-		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
-		if not self.client.wait_for_server(timeout_sec=timeout_sec):
+		# 非阻塞探测：不在 setup 阶段阻塞等待，避免多个动作串行累加撑爆
+		# py_trees_ros 的 setup 总超时预算导致节点崩溃。
+		if not self.client.wait_for_server(timeout_sec=0.0):
 			self.node.get_logger().warn(
 				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
 				f"will wait for it at tick time"

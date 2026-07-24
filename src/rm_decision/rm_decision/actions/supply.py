@@ -88,8 +88,8 @@ class SupplyManagerAction(py_trees.behaviour.Behaviour):
 		# Ensure action server available. Do NOT raise if missing: when launched
 		# alongside the Nav2 stack the server may not be active yet; we check
 		# server_is_ready() before sending a goal instead.
-		timeout_sec = float(kwargs.get('timeout', 3.0)) if 'timeout' in kwargs else 3.0
-		if not self.client.wait_for_server(timeout_sec=timeout_sec):
+		# 非阻塞探测（见 NavigateToPoseAction.setup 说明）：不在 setup 阻塞等待 server。
+		if not self.client.wait_for_server(timeout_sec=0.0):
 			self.node.get_logger().warn(
 				f"{self.name}: Nav2 NavigateToPose server not ready at setup; "
 				f"will wait for it at tick time"
